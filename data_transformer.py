@@ -1,5 +1,3 @@
-import pandas as pd
-
 def normalize_vemcount_response(response_json: dict) -> pd.DataFrame:
     rows = []
 
@@ -15,6 +13,9 @@ def normalize_vemcount_response(response_json: dict) -> pd.DataFrame:
                 "count_in": float(data.get("count_in", 0)),
                 "conversion_rate": float(data.get("conversion_rate", 0)),
                 "sales_per_transaction": float(data.get("sales_per_transaction") or 0),
+                "sales_per_sqm": float(data.get("sales_per_sqm") or 0),
+                "sales_per_visitor": float(data.get("sales_per_visitor") or 0),
+                "sq_meter": float(data.get("sq_meter") or 0)
             }
             rows.append(row)
 
