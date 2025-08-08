@@ -1,217 +1,164 @@
-# streamlit_sales_per_sqm_potential.py
-import os
-import sys
-import numpy as np
-import pandas as pd
-import requests
-import streamlit as st
-import plotly.express as px
-
-# Voeg parent directory toe aan sys.path voor imports
-sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
-
-from shop_mapping import SHOP_NAME_MAP
-
-# === PAGE CONFIG ===
-st.set_page_config(page_title="Sales-per-sqm Potentieel", page_icon="📊", layout="wide")
-
-# === Styling (uniform) ===
-st.markdown(
-    """
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap');
-
-    html, body, [class*="css"] {
-        font-family: 'Instrument Sans', sans-serif !important;
-    }
-
-    [data-baseweb="tag"] {
-        background-color: #9E77ED !important;
-        color: white !important;
-    }
-
-    button[data-testid="stBaseButton-secondary"] {
-        background-color: #F04438 !important;
-        color: white !important;
-        border-radius: 16px !important;
-        font-weight: 600 !important;
-        font-family: "Instrument Sans", sans-serif !important;
-        padding: 0.6rem 1.4rem !important;
-        border: none !important;
-        box-shadow: none !important;
-    }
-    button[data-testid="stBaseButton-secondary"]:hover {
-        background-color: #d13c30 !important;
-        cursor: pointer;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-
-st.title("📊 Sales-per-sqm Potentieel (CSm²I)")
-st.caption("Analyseer locaties op basis van sales per m² en identificeer potentieel bij CSm²I = 1,00.")
-
-# === API CONFIG ===
-try:
-    API_URL = st.secrets["API_URL"]
-except KeyError:
-    st.error("❌ API_URL ontbreekt in Streamlit secrets.")
-    st.stop()
-
-# === INPUTS ===
-period = st.selectbox("Periode", [
-    "yesterday", "today", "this_week", "last_week",
-    "this_month", "last_month", "this_quarter", "last_quarter",
-    "this_year", "last_year"
-], index=5)
-
-NAME_TO_ID = {v: k for k, v in SHOP_NAME_MAP.items()}
-ID_TO_NAME = {k: v for k, v in SHOP_NAME_MAP.items()}
-default_names = list(NAME_TO_ID.keys())
-
-selected_names = st.multiselect("Select stores", options=list(NAME_TO_ID.keys()), default=default_names)
-shop_ids = [NAME_TO_ID[n] for n in selected_names]
-
-if not shop_ids:
-    st.warning("Selecteer minimaal één store.")
-    st.stop()
-
-# === API CALL FUNCTION ===
-def get_kpi_data_for_stores(shop_ids, period="last_month"):
-    params = []
-    for sid in shop_ids:
-        params.append(("data[]", sid))
-    metrics = [
-        "count_in", "sales_per_visitor", "sales_per_sqm",
-        "conversion_rate", "sales_per_transaction",
-        "turnover", "sq_meter"
-    ]
-    for m in metrics:
-        params.append(("data_output[]", m))
-
-    params += [
-        ("source", "shops"),
-        ("period", period),
-        ("period_step", "day"),  # Hardcoded
-        ("weather", "0"),
-        ("step", "day")
-    ]
-
+def _to_float(x):
+if x is None or x == "":
+return np.nan
     try:
-        response = requests.post(API_URL, params=params)
-        if response.status_code == 200:
-            full_response = response.json()
-            if "data" in full_response and period in full_response["data"]:
-                return normalize_vemcount_response(full_response["data"][period])
-            else:
-                st.error("⚠️ Geen 'data' gevonden in API-response.")
-        else:
-            st.error(f"❌ Error fetching data: {response.status_code} - {response.text}")
-    except Exception as e:
-        st.error(f"🚨 API call exception: {e}")
-    return pd.DataFrame()
+        return float(x)
+    except Exception:
+        return np.nan
+    try: return float(x)
+    except Exception: return np.nan
 
-# === NORMALIZE RESPONSE ===
-def normalize_vemcount_response(response_json: dict) -> pd.DataFrame:
-    rows = []
-    for shop_id, shop_content in response_json.items():
-        sq_meter = None
-        if "data" in shop_content and "sq_meter" in shop_content["data"]:
-            sq_meter = float(shop_content["data"]["sq_meter"] or 0)
+def _eur(num, decimals=2):
+    if pd.isna(num):
+        return ""
+    if pd.isna(num): return ""
+s = f"{float(num):,.{decimals}f}"
+return "€" + s.replace(",", "X").replace(".", ",").replace("X", ".")
 
-        dates = shop_content.get("dates", {})
-        for date_label, day_info in dates.items():
-            data = day_info.get("data", {})
-            row = {
-                "shop_id": int(shop_id),
-                "date": data.get("dt"),
-                "sq_meter": sq_meter,
-                "count_in": float(data.get("count_in") or 0),
-                "sales_per_visitor": float(data.get("sales_per_visitor") or 0),
-                "sales_per_sqm": float(data.get("sales_per_sqm") or 0),
-                "conversion_rate": float(data.get("conversion_rate") or 0),
-                "sales_per_transaction": float(data.get("sales_per_transaction") or 0),
-                "turnover": float(data.get("turnover") or 0)
-            }
-            rows.append(row)
-    df = pd.DataFrame(rows)
-    return df
+# === API CALL (identiek aan je andere calcs: POST met params, ZONDER [] in keys) ===
+# === API CALL (POST met params, ZONDER [] in keys) ===
+def fetch_report(api_url: str, shop_ids: list[int], period: str, step: str, metrics: list[str]):
+params = [("data", sid) for sid in shop_ids]
+params += [("data_output", m) for m in metrics]
+@@ -79,15 +76,11 @@ def fetch_report(api_url: str, shop_ids: list[int], period: str, step: str, metr
+r = requests.post(api_url, params=params, timeout=40)
+status = r.status_code
+text_preview = r.text[:2000] if r.text else ""
+    try:
+        js = r.json()
+    except Exception:
+        js = {}
 
-# === RUN ANALYSIS ===
+    req_info = {"url": api_url, "params_list": params}
+    return js, req_info, status, text_preview
+    try: js = r.json()
+    except Exception: js = {}
+    return js, {"url": api_url, "params_list": params}, status, text_preview
+
+# === PARSER: ondersteunt geneste dates-structuur + aggregatie naar 1 regel per winkel ===
+# === PARSER: geneste dates-structuur + aggregatie naar 1 regel per winkel ===
+def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str], period_key: str) -> pd.DataFrame:
+if not isinstance(payload, dict): return pd.DataFrame()
+if "data" in payload and isinstance(payload["data"], dict) and period_key in payload["data"]:
+@@ -100,39 +93,32 @@ def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str], period
+for _, day_info in dates.items():
+day_data = (day_info or {}).get("data", {}) or {}
+row = {"shop_id": sid}
+                for f in fields:
+                    row[f] = _to_float(day_data.get(f))
+                for f in fields: row[f] = _to_float(day_data.get(f))
+if row.get("sq_meter") is None or np.isnan(row.get("sq_meter")):
+sm = ((shop_block.get("data") or {}).get("sq_meter"))
+row["sq_meter"] = _to_float(sm)
+rows.append(row)
+if not rows: return pd.DataFrame()
+df = pd.DataFrame(rows)
+        agg = {}
+        for f in fields:
+            if f in ["count_in", "turnover"]: agg[f] = "sum"
+            elif f in ["sq_meter"]: agg[f] = "max"
+            else: agg[f] = "mean"
+        agg = {f: ("sum" if f in ["count_in","turnover"] else "max" if f=="sq_meter" else "mean") for f in fields}
+return df.groupby("shop_id", as_index=False).agg(agg)
+
+if "data" in payload and isinstance(payload["data"], dict):
+flat = []
+for sid in shop_ids:
+rec = payload["data"].get(str(sid), {}) or {}
+row = {"shop_id": sid}
+            for f in fields:
+                row[f] = _to_float(rec.get(f))
+            for f in fields: row[f] = _to_float(rec.get(f))
+flat.append(row)
+return pd.DataFrame(flat)
+
+return pd.DataFrame()
+
+# === RUN SIMULATION (zelfde UX‑flow als je andere calcs) ===
+# === RUN ===
 if st.button("Analyseer", type="secondary"):
-    df = get_kpi_data_for_stores(shop_ids, period=period)
+with st.spinner("Calculating hidden location potential..."):
+metrics = ["count_in","sales_per_visitor","sales_per_sqm",
+"conversion_rate","sales_per_transaction","turnover","sq_meter"]
 
-    if not df.empty:
-        # Aggregate per store
-        df_group = df.groupby("shop_id").agg({
-            "sq_meter": "first",
-            "count_in": "sum",
-            "sales_per_visitor": "mean",
-            "sales_per_sqm": "mean",
-            "conversion_rate": "mean",
-            "sales_per_transaction": "mean",
-            "turnover": "sum"
-        }).reset_index()
+payload, req_info, status, text_preview = fetch_report(API_URL, shop_ids, period, STEP, metrics)
 
-        df_group["store_name"] = df_group["shop_id"].map(ID_TO_NAME)
-        df_group["visitors_per_sqm"] = df_group["count_in"] / df_group["sq_meter"].replace(0, np.nan)
-        df_group["expected_spsqm"] = df_group["sales_per_visitor"] * df_group["visitors_per_sqm"]
-        df_group["CSm2I"] = df_group["sales_per_sqm"] / df_group["expected_spsqm"].replace(0, np.nan)
-        df_group["uplift_eur"] = np.maximum(0.0, df_group["expected_spsqm"] - df_group["sales_per_sqm"]) * df_group["sq_meter"]
+with st.expander("🔧 Request/Response Debug"):
+@@ -146,7 +132,6 @@ def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str], period
+st.stop()
 
-        total_extra_turnover = df_group["uplift_eur"].sum()
+df = parse_vemcount(payload, shop_ids, fields=metrics, period_key=period)
 
-        # === TOP PANEL ===
-        st.markdown(f"""
-            <div style='background-color: #FEAC76;
-                        padding: 1.5rem;
-                        border-radius: 0.75rem;
-                        font-size: 1.25rem;
-                        font-weight: 600;
-                        text-align: center;
-                        margin-bottom: 1.5rem;'>
-                🚀 Potentieel extra omzet ({period} bij CSm²I = 1,00): 
-                <span style='font-size:1.5rem;'>€{str(f"{total_extra_turnover:,.0f}").replace(",", ".")}</span>
-            </div>
-        """, unsafe_allow_html=True)
+if df.empty:
+st.error("Geen data (na parsen/aggregatie). Check periode en debug.")
+st.stop()
+@@ -166,14 +151,15 @@ def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str], period
+df["CSm2I"] = df["actual_spsqm"] / (df["expected_spsqm"] + eps)   # index; 1.00 = op niveau
+df["uplift_eur"] = np.maximum(0.0, df["expected_spsqm"] - df["actual_spsqm"]) * sq
 
-        # === BAR CHART ===
-        chart_df = df_group.sort_values("uplift_eur", ascending=False)
-        fig_bar = px.bar(chart_df, x="store_name", y="uplift_eur", text="uplift_eur",
-                         color_discrete_sequence=["#762181"])
-        fig_bar.update_traces(texttemplate="€%{y:,.0f}", textposition="outside")
-        fig_bar.update_yaxes(title="Potential Revenue Uplift (€)", tickprefix="€")
-        st.plotly_chart(fig_bar, use_container_width=True)
+        # === KPI‑BANNER ===
+        # === KPI‑BANNER (duidelijke tekst over periode & CSm²I) ===
+total_extra = float(df["uplift_eur"].sum())
+st.markdown(f"""
+           <div style='background-color: #FEAC76; color: #000000;
+                       padding: 1.5rem; border-radius: 0.75rem;
+                        font-size: 1.25rem; font-weight: 600;
+                        font-size: 1.05rem; font-weight: 600;
+                       text-align: center; margin-bottom: 1.5rem;'>
+                🚀 The potential revenue growth is <span style='font-size:1.5rem;'>{_eur(total_extra, 0)}</span>
+                🚀 Potential revenue growth <span style='opacity:.75'>(if each store reaches <b>CSm²I = 1.0</b>, over <b>{period}</b>)</span><br/>
+                <span style='font-size:1.6rem;'>{_eur(total_extra, 0)}</span>
+           </div>
+       """, unsafe_allow_html=True)
 
-        # === SCATTER CHART ===
-        fig_scatter = px.scatter(
-            df_group, x="sales_per_visitor", y="visitors_per_sqm",
-            size="uplift_eur", color="CSm2I",
-            color_continuous_scale="Viridis",
-            hover_name="store_name"
-        )
-        fig_scatter.update_layout(
-            xaxis=dict(range=[df_group["sales_per_visitor"].min() * 0.95,
-                              df_group["sales_per_visitor"].max() * 1.05]),
-            yaxis_title="Visitors per m²",
-            xaxis_title="Sales per Visitor"
-        )
-        st.plotly_chart(fig_scatter, use_container_width=True)
+@@ -202,12 +188,21 @@ def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str], period
+yaxis_title="Potential revenue uplift (€)")
+st.plotly_chart(fig, use_container_width=True)
 
-        # === TABLE ===
-        table_df = df_group[[
-            "store_name", "sq_meter", "sales_per_sqm", "CSm2I", "uplift_eur"
-        ]].copy()
-        table_df.rename(columns={
-            "store_name": "Store",
-            "sq_meter": "Square meters",
-            "sales_per_sqm": "Current Avg Sales per sqm",
-            "uplift_eur": "Potential Revenue Uplift (€)"
-        }, inplace=True)
-        table_df["Potential Revenue Uplift (€)"] = table_df["Potential Revenue Uplift (€)"].map(lambda x: f"€{x:,.0f}".replace(",", "."))
-        st.dataframe(table_df, use_container_width=True)
+        # === SCATTER (Viridis + duidelijke legenda + slimme x-as) ===
+        # === SCATTER (Viridis + slimme x/y-as schaal) ===
+sc = df[["Store","sales_per_visitor","visitors_per_sqm","CSm2I","uplift_eur"]].copy()
+sc["uplift_fmt"] = sc["uplift_eur"].map(lambda v: _eur(v, 0))
+        x_min, x_max = float(np.nanmin(sc["sales_per_visitor"])), float(np.nanmax(sc["sales_per_visitor"]))
+        span = max(0.01, x_max - x_min); pad = span * 0.05
+        x_range = [x_min - pad, x_max + pad]
 
-        st.caption("📌 CSm²I = Current Sales per sqm Index — verhouding actuele / verwachte omzet/m². Potentieel berekend als extra omzet indien CSm²I minimaal 1,00 wordt.")
-    else:
-        st.warning("Geen data opgehaald.")
+        # Slimme ranges: 2–98 percentiel met kleine marge → minimaliseert witte ruimte
+        def smart_range(s):
+            s = s.astype(float).replace([np.inf,-np.inf], np.nan).dropna()
+            if s.empty: return None
+            p2, p98 = np.percentile(s, [2, 98])
+            span = max(0.001, p98 - p2)
+            pad = span * 0.08
+            return [p2 - pad, p98 + pad]
+
+        x_rng = smart_range(sc["sales_per_visitor"])
+        y_rng = smart_range(sc["visitors_per_sqm"])
+
+fig2 = px.scatter(
+sc, x="sales_per_visitor", y="visitors_per_sqm",
+@@ -225,17 +220,19 @@ def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str], period
+fig2.update_layout(
+margin=dict(l=10,r=10,t=30,b=10),
+xaxis_title="Sales per Visitor", yaxis_title="Visitors per m²",
+            xaxis=dict(range=x_range),
+            xaxis=dict(range=x_rng) if x_rng else None,
+            yaxis=dict(range=y_rng) if y_rng else None,
+coloraxis_colorbar=dict(title="CSm²I (index)")
+)
+st.plotly_chart(fig2, use_container_width=True)
+
+        # === KORTE TOELICHTING ===
+        # === KORTE TOELICHTING (wat is CSm²I en hoe uplift wordt berekend) ===
+st.markdown(
+"""
+           **Toelichting**  
+            - **CSm²I (index)**: gerealiseerd t.o.v. verwacht omzet per m². *1,00* = op verwachting; *<1,00* = onderprestatie.  
+            - **Potential revenue uplift (€)**: indicatie van **extra omzet op jaarbasis** als de winkel naar verwacht niveau groeit
+              (geëxtrapoleerd uit de gekozen periode, berekend als *(expected − actual) × m²*).  
+            - **CSm²I (index)** = *actual sales per m²* ÷ *expected sales per m²*.  
+              Het **verwachte** niveau = *(sales per visitor) × (visitors per m²)*.  
+            - **Uplift (€)** = *(expected − actual) × m²*, dus het **extra omzetpotentieel in de gekozen periode**
+              als de winkel naar **CSm²I = 1.0** groeit (zonder extra traffic).  
+           """
+)
