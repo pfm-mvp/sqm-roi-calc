@@ -1,4 +1,4 @@
-# streamlit_sales_per_sqm_potential.py
+# pages/streamlit_sales_per_sqm_potential.py
 import os, sys
 import numpy as np
 import pandas as pd
@@ -6,29 +6,36 @@ import requests
 import streamlit as st
 import plotly.express as px
 
-# Mapping importeren
+# === Imports / mapping (zelfde structuur als je andere calcs)
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
 from shop_mapping import SHOP_NAME_MAP
 
-st.set_page_config(page_title="Sales-per-sqm Potentieel", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Sales-per-sqm Potentieel (CSm²I)", page_icon="📊", layout="wide")
 
-# Styling
+# === Styling (zelfde look & feel)
 PFM_RED = "#F04438"
 st.markdown(f"""
 <style>
 .stButton>button {{
   background-color: {PFM_RED};
-  color: white; border-radius: 12px; padding: .6rem 1rem; font-weight: 600; border: none;
+  color: white;
+  border-radius: 12px;
+  padding: .6rem 1rem;
+  font-weight: 600; border: none;
 }}
 .block-container {{ padding-top: 2rem; padding-bottom: 2rem; }}
 </style>
 """, unsafe_allow_html=True)
 
 st.title("📊 Sales-per-sqm Potentieel (CSm²I)")
-st.caption("Naamselectie via SHOP_NAME_MAP, NVO (sq_meter) via API. Periode + period_step instelbaar. API-URL & API-TOKEN uit Streamlit secrets.")
+st.caption("Naamselectie via SHOP_NAME_MAP, NVO (sq_meter) via API. Periode + period_step instelbaar. Secrets via Streamlit.")
 
-# -------- Invoer --------
-colA, colB, colC, colD = st.columns([1,1,1,1])
+# === Secrets (exact als je andere calculators)
+API_URL = st.secrets["API_URL"]
+API_TOKEN = st.secrets["API_TOKEN"]
+
+# === UI inputs (zelfde patroon)
+colA, colB, colC = st.columns([1,1,1])
 with colA:
     mock_mode = st.toggle("Gebruik mock data", value=False)
 with colB:
@@ -38,14 +45,8 @@ with colB:
 with colC:
     PERIOD_STEPS = ["hour","day","week","month","quarter","year","total"]
     period_step = st.selectbox("Period Step", options=PERIOD_STEPS, index=1)
-with colD:
-    API_URL = st.secrets.get("API_URL", "").strip()
-    API_TOKEN = st.secrets.get("API_TOKEN", "").strip()
-    if not API_URL or not API_TOKEN:
-        st.error("❌ API_URL of API_TOKEN ontbreekt in `.streamlit/secrets.toml`. Voeg deze toe om verder te gaan.")
-        st.stop()
 
-# Mapping
+# === Naam ↔ ID mapping (zoals elders)
 NAME_TO_ID = {v: k for k, v in SHOP_NAME_MAP.items()}
 ID_TO_NAME = {k: v for k, v in SHOP_NAME_MAP.items()}
 default_names = [ID_TO_NAME[i] for i in SHOP_NAME_MAP.keys()]
@@ -55,7 +56,7 @@ if not shop_ids:
     st.warning("Selecteer minimaal één store.")
     st.stop()
 
-# -------- API call (met verplichte Bearer) --------
+# === API call — exact zoals je werkende calculators (POST met querystring, Bearer verplicht)
 def fetch_report(api_url: str, period: str, shop_ids: list[int], metrics: list[str], step: str):
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
 
@@ -71,7 +72,7 @@ def fetch_report(api_url: str, period: str, shop_ids: list[int], metrics: list[s
     for m in metrics:
         params.append(("data_output[]", m))
 
-    # Zelf querystring bouwen om [] intact te houden
+    # Querystring zelf bouwen zodat [] niet ge-escaped worden
     query = "&".join(f"{k}={v}" for k, v in params)
     final_url = f"{api_url}?{query}"
 
@@ -85,21 +86,15 @@ def fetch_report(api_url: str, period: str, shop_ids: list[int], metrics: list[s
         js = {}
 
     # Mask token in debug
-    debug_headers = {**headers}
-    if "Authorization" in debug_headers:
-        debug_headers["Authorization"] = "Bearer ***masked***"
+    dbg_headers = {"Authorization": "Bearer ***masked***"}
 
-    req_info = {
-        "url": final_url,
-        "headers": debug_headers,
-        "params_list": params
-    }
+    req_info = {"url": final_url, "headers": dbg_headers, "params_list": params}
     return js, req_info, status, text_preview
 
-# -------- Parser --------
+# === Parser (platte 'data' structuur; kan later uitgebreid worden met 'dates' indien nodig)
 def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str]) -> pd.DataFrame:
     rows = []
-    if isinstance(payload, dict) and "data" in payload:
+    if isinstance(payload, dict) and "data" in payload and isinstance(payload["data"], dict):
         for sid in shop_ids:
             rec = payload["data"].get(str(sid), {}) or {}
             row = {"shop_id": sid}
@@ -108,7 +103,7 @@ def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str]) -> pd.
             rows.append(row)
     return pd.DataFrame(rows)
 
-# -------- Mock --------
+# === Mock data (voor snelle local test)
 def make_mock_dataframe(shop_ids: list[int], rng_seed=42) -> pd.DataFrame:
     rng = np.random.default_rng(rng_seed); n = len(shop_ids)
     sq = rng.uniform(90, 250, size=n); count_in = rng.integers(6000, 24000, size=n)
@@ -123,42 +118,58 @@ def make_mock_dataframe(shop_ids: list[int], rng_seed=42) -> pd.DataFrame:
         "turnover": turnover
     })
 
-# -------- Analyse --------
+# === Analyse-run
 if st.button("Analyseer", type="primary"):
     try:
-        metrics = ["count_in","sales_per_visitor","sales_per_sqm",
-                   "conversion_rate","sales_per_transaction","turnover","sq_meter"]
+        metrics = [
+            "count_in",
+            "sales_per_visitor",
+            "sales_per_sqm",
+            "conversion_rate",
+            "sales_per_transaction",
+            "turnover",
+            "sq_meter"
+        ]
 
         if mock_mode:
             df = make_mock_dataframe(shop_ids)
             st.info("Mock data gebruikt")
         else:
             payload, req_info, status, text_preview = fetch_report(API_URL, period, shop_ids, metrics, step=period_step)
+
+            # Debug zoals je gewend bent
             with st.expander("🔧 Request/Response Debug"):
                 st.write("➡️  POST naar:", req_info["url"])
                 st.write("➡️  Headers:", req_info["headers"])
                 st.write("➡️  Params list:", req_info["params_list"])
                 st.write("⬅️  HTTP status:", status)
                 st.write("⬅️  Response preview:"); st.code(text_preview or "<empty>")
+
             if status != 200:
-                st.error(f"API gaf status {status}. Zie debug hierboven."); st.stop()
+                st.error(f"API gaf status {status}. Zie debug hierboven.")
+                st.stop()
+
             df = parse_vemcount(payload, shop_ids, fields=metrics)
 
         if df.empty:
-            st.error("Geen data (na parsen). Controleer periode/period_step en debug."); st.stop()
+            st.error("Geen data (na parsen). Check periode/period_step en debug.")
+            st.stop()
 
-        # -------- Berekeningen --------
+        # === Berekeningen (CSm²I & uplift)
         df["store_name"] = df["shop_id"].map(ID_TO_NAME)
         sq = df["sq_meter"].replace(0, np.nan)
+
         df["visitors_per_sqm"] = df["count_in"] / sq
-        df["expected_spsqm"] = df["sales_per_visitor"] * df["visitors_per_sqm"]
+        df["expected_spsqm"]   = df["sales_per_visitor"] * df["visitors_per_sqm"]
+
         actual_chk = df["turnover"] / sq
         sales_sqm = df.get("sales_per_sqm", pd.Series(np.nan, index=df.index))
         df["actual_spsqm"] = np.where(sales_sqm.notna(), sales_sqm, actual_chk)
+
         df["CSm2I"] = df["actual_spsqm"] / df["expected_spsqm"]
         df["uplift_eur"] = np.maximum(0.0, df["expected_spsqm"] - df["actual_spsqm"]) * sq
 
-        # -------- Output --------
+        # === Output
         st.subheader("🏆 Top underperformers")
         topN = df.sort_values("CSm2I").head(10).copy()
         topN["uplift_eur_fmt"] = topN["uplift_eur"].map(lambda x: f"€{x:,.0f}".replace(",", "."))
