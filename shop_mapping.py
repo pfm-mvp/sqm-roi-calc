@@ -1,12 +1,10 @@
 SHOP_NAME_MAP = {
-    26304: "Amsterdam",
-    26560: "Paris",
-    26509: "Berlin",
-    26480: "Zurich",
-    26640: "Madrid",
-    26359: "Stockholm",
-    26630: "Rotterdam",
-    27038: "Utrecht",
-    26647: "Hamburg",
-    26646: "Milan"
+    32224: "Amersfoort",
+    31977: "Amsterdam",
+    31831: "Den Bosch",
+    32319: "Leiden",
+    30058: "Nijmegen",
+    32320: "Rotterdam",
+    32204: "Venlo"
 }
+
