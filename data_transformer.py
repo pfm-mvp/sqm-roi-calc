@@ -9,7 +9,7 @@ import plotly.express as px
 
 # Pad één niveau omhoog zodat we shop_mapping kunnen importeren
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
-from shop_mapping import SHOP_NAME_MAP
+from shop_mapping import SHOP_NAME_MAP  # ✅ data_transformer import verwijderd
 
 st.set_page_config(page_title="Sales-per-sqm Potentieel", page_icon="📊", layout="wide")
 
@@ -41,7 +41,7 @@ st.caption("Naamselectie via SHOP_NAME_MAP, NVO (sq_meter) via API, presets als 
 # =========================
 # Inputs
 # =========================
-colA, colB, colC = st.columns([1,1,1])
+colA, colB, colC, colD = st.columns([1,1,1,1])
 with colA:
     mock_mode = st.toggle("Gebruik mock data", value=False)
 
@@ -53,9 +53,13 @@ with colB:
         "this_quarter","last_quarter",
         "this_year","last_year"
     ]
-    period = st.selectbox("", options=PRESETS, index=4, label_visibility="collapsed")
+    period = st.selectbox("Periode", options=PRESETS, index=4)
 
 with colC:
+    PERIOD_STEPS = ["hour", "day", "week", "month", "quarter", "year", "total"]
+    period_step = st.selectbox("Period Step", options=PERIOD_STEPS, index=1)
+
+with colD:
     try:
         API_URL = st.secrets["API_URL"]
     except KeyError:
@@ -80,7 +84,7 @@ if not shop_ids:
 # =========================
 # API call (POST met [] keys)
 # =========================
-def fetch_report(api_full_url: str, period: str, shop_ids: list[int], metrics: list[str], step: str = "day"):
+def fetch_report(api_full_url: str, period: str, shop_ids: list[int], metrics: list[str], step: str):
     payload = [
         ("source", "shops"),
         ("period", period),
@@ -98,10 +102,6 @@ def fetch_report(api_full_url: str, period: str, shop_ids: list[int], metrics: l
 # Slimme parser
 # =========================
 def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str]) -> pd.DataFrame:
-    """
-    Werkt voor zowel platte 'data'-structuur als geneste 'dates'-structuur.
-    Aggegreert automatisch naar 1 regel per winkel.
-    """
     rows = []
 
     # CASE 1: Platte structuur
@@ -185,7 +185,7 @@ if st.button("Analyseer", type="primary"):
             df = make_mock_dataframe(shop_ids)
             st.info("Mock data gebruikt")
         else:
-            payload = fetch_report(API_URL, period, shop_ids, metrics, step="day")
+            payload = fetch_report(API_URL, period, shop_ids, metrics, step=period_step)
             with st.expander("🔍 API Response Debug"):
                 st.json(payload)
             df = parse_vemcount(payload, shop_ids, fields=metrics)
