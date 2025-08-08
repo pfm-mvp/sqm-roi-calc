@@ -12,20 +12,48 @@ from shop_mapping import SHOP_NAME_MAP
 
 st.set_page_config(page_title="Sales-per-sqm Potentieel (CSm²I)", page_icon="📊", layout="wide")
 
-# === Styling
-PFM_RED = "#F04438"
-st.markdown(f"""
-<style>
-.stButton>button {{
-  background-color: {PFM_RED};
-  color: white;
-  border-radius: 12px;
-  padding: .6rem 1rem;
-  font-weight: 600; border: none;
-}}
-.block-container {{ padding-top: 2rem; padding-bottom: 2rem; }}
-</style>
-""", unsafe_allow_html=True)
+# === Styling (paarse pills + PFM-rode knop; uniform met andere apps)
+st.markdown(
+    """
+    <style>
+    /* Font import */
+    @import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap');
+
+    /* Forceer Instrument Sans overal */
+    html, body, [class*="css"] {
+        font-family: 'Instrument Sans', sans-serif !important;
+    }
+
+    /* 🎨 Multiselect pills in paars */
+    [data-baseweb="tag"] {
+        background-color: #9E77ED !important;
+        color: white !important;
+    }
+
+    /* 🔴 Rode knop (cover zowel primary als secondary) */
+    button[kind="secondary"], button[kind="primary"], button[data-testid="stBaseButton-secondary"], .stButton>button {
+        background-color: #F04438 !important;
+        color: white !important;
+        border-radius: 16px !important;
+        font-weight: 600 !important;
+        font-family: "Instrument Sans", sans-serif !important;
+        padding: 0.6rem 1.4rem !important;
+        border: none !important;
+        box-shadow: none !important;
+        transition: background-color 0.2s ease-in-out;
+    }
+    button[kind="secondary"]:hover, button[kind="primary"]:hover,
+    button[data-testid="stBaseButton-secondary"]:hover, .stButton>button:hover {
+        background-color: #d13c30 !important;
+        cursor: pointer;
+    }
+
+    /* Compacte page paddings */
+    .block-container { padding-top: 2rem; padding-bottom: 2rem; }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 st.title("📊 Sales-per-sqm Potentieel (CSm²I)")
 st.caption("Selecteer winkels en periode. NVO (sq_meter) via API. Berekening op dag-niveau (STEP='day').")
@@ -40,7 +68,7 @@ with colA:
                "this_quarter","last_quarter","this_year","last_year"]
     period = st.selectbox("Periode", options=PRESETS, index=5)
 with colB:
-    pass  # plek gehouden voor evt. extra filters later
+    pass  # ruimte voor evt. filter later
 
 # Hardcode step (geen input)
 STEP = "day"
@@ -91,7 +119,7 @@ def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str], period
     if not isinstance(payload, dict):
         return pd.DataFrame()
 
-    # Geneste structuur
+    # Geneste structuur: payload["data"][period_key][shop_id]["dates"][...]["data"]
     if "data" in payload and isinstance(payload["data"], dict) and period_key in payload["data"]:
         per = payload["data"].get(period_key, {})
         rows = []
@@ -105,6 +133,7 @@ def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str], period
                 row = {"shop_id": sid}
                 for f in fields:
                     row[f] = _to_float(day_data.get(f))
+                # sq_meter fallback uit shop meta indien dag-level ontbreekt
                 if row.get("sq_meter") is None or np.isnan(row.get("sq_meter")):
                     sm = ((shop_block.get("data") or {}).get("sq_meter"))
                     row["sq_meter"] = _to_float(sm)
@@ -114,6 +143,7 @@ def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str], period
             return pd.DataFrame()
 
         df = pd.DataFrame(rows)
+        # Aggregatie: som voor telwaarden, gemiddelde voor ratio's, max voor sq_meter
         agg = {}
         for f in fields:
             if f in ["count_in", "turnover"]:
@@ -124,7 +154,7 @@ def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str], period
                 agg[f] = "mean"
         return df.groupby("shop_id", as_index=False).agg(agg)
 
-    # Platte structuur
+    # Platte structuur {"data": {"<shop_id>": {metric: value}}}
     if "data" in payload and isinstance(payload["data"], dict):
         flat = []
         for sid in shop_ids:
@@ -137,79 +167,97 @@ def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str], period
 
     return pd.DataFrame()
 
-# === Analyse-run (altijd live data)
-if st.button("Analyseer", type="primary"):
-    try:
-        metrics = [
-            "count_in",
-            "sales_per_visitor",
-            "sales_per_sqm",
-            "conversion_rate",
-            "sales_per_transaction",
-            "turnover",
-            "sq_meter"
-        ]
+# === Analyse-run (uniforme workflow: Run simulation)
+if st.button("Run simulation"):  # zelfde label als je andere apps
+    with st.spinner("Calculating hidden location potential..."):
+        try:
+            metrics = [
+                "count_in",
+                "sales_per_visitor",
+                "sales_per_sqm",
+                "conversion_rate",
+                "sales_per_transaction",
+                "turnover",
+                "sq_meter"
+            ]
 
-        payload, req_info, status, text_preview = fetch_report(API_URL, shop_ids, period, STEP, metrics)
+            payload, req_info, status, text_preview = fetch_report(API_URL, shop_ids, period, STEP, metrics)
 
-        # Debug
-        with st.expander("🔧 Request/Response Debug"):
-            st.write("➡️  POST naar:", req_info["url"])
-            st.write("➡️  Params list:", req_info["params_list"])
-            st.write("⬅️  HTTP status:", status)
-            st.write("⬅️  Response preview:"); st.code(text_preview or "<empty>")
+            # Debug (consistent met je andere apps)
+            with st.expander("🔧 Request/Response Debug"):
+                st.write("➡️  POST naar:", req_info["url"])
+                st.write("➡️  Params list:", req_info["params_list"])
+                st.write("⬅️  HTTP status:", status)
+                st.write("⬅️  Response preview:"); st.code(text_preview or "<empty>")
 
-        if status != 200:
-            st.error(f"API gaf status {status}. Zie debug hierboven.")
-            st.stop()
+            if status != 200:
+                st.error(f"API gaf status {status}. Zie debug hierboven.")
+                st.stop()
 
-        df = parse_vemcount(payload, shop_ids, fields=metrics, period_key=period)
+            df = parse_vemcount(payload, shop_ids, fields=metrics, period_key=period)
 
-        if df.empty:
-            st.error("Geen data (na parsen/aggregatie). Check periode en debug.")
-            st.stop()
+            if df.empty:
+                st.error("Geen data (na parsen/aggregatie). Check periode en debug.")
+                st.stop()
 
-        # === Berekeningen (CSm²I & uplift)
-        df["store_name"] = df["shop_id"].map(ID_TO_NAME)
-        sq = df["sq_meter"].astype(float).replace(0, np.nan)
+            # === Berekeningen (CSm²I & uplift)
+            df["store_name"] = df["shop_id"].map(ID_TO_NAME)
+            sq = df["sq_meter"].astype(float).replace(0, np.nan)
 
-        df["visitors_per_sqm"] = df["count_in"].astype(float) / sq
-        df["expected_spsqm"]   = df["sales_per_visitor"].astype(float) * df["visitors_per_sqm"]
+            df["visitors_per_sqm"] = df["count_in"].astype(float) / sq
+            df["expected_spsqm"]   = df["sales_per_visitor"].astype(float) * df["visitors_per_sqm"]
 
-        actual_chk = df["turnover"].astype(float) / sq
-        sales_sqm = df.get("sales_per_sqm", pd.Series(np.nan, index=df.index)).astype(float)
-        df["actual_spsqm"] = np.where(sales_sqm.notna(), sales_sqm, actual_chk)
+            actual_chk = df["turnover"].astype(float) / sq
+            sales_sqm = df.get("sales_per_sqm", pd.Series(np.nan, index=df.index)).astype(float)
+            df["actual_spsqm"] = np.where(sales_sqm.notna(), sales_sqm, actual_chk)
 
-        eps = 1e-9
-        df["CSm2I"] = df["actual_spsqm"] / (df["expected_spsqm"] + eps)
-        df["uplift_eur"] = np.maximum(0.0, df["expected_spsqm"] - df["actual_spsqm"]) * sq
+            eps = 1e-9
+            df["CSm2I"] = df["actual_spsqm"] / (df["expected_spsqm"] + eps)
+            df["uplift_eur"] = np.maximum(0.0, df["expected_spsqm"] - df["actual_spsqm"]) * sq
 
-        # === Output
-        st.subheader("🏆 Top underperformers (laagste CSm²I)")
-        topN = df.sort_values("CSm2I").head(10).copy()
-        topN["uplift_eur_fmt"] = topN["uplift_eur"].map(lambda x: f"€{x:,.0f}".replace(",", "."))
-        st.dataframe(topN[["store_name","shop_id","CSm2I","uplift_eur_fmt"]], use_container_width=True)
+            # === KPI-banner bovenaan (uniform met je andere apps)
+            total_extra_turnover = float(df["uplift_eur"].sum())
+            st.markdown(f"""
+                <div style='background-color: #FEAC76;
+                            color: #000000;
+                            padding: 1.5rem;
+                            border-radius: 0.75rem;
+                            font-size: 1.25rem;
+                            font-weight: 600;
+                            text-align: center;
+                            margin-bottom: 1.5rem;'>
+                    🚀 The potential revenue growth is
+                    <span style='font-size:1.5rem;'>€{str(f"{total_extra_turnover:,.0f}").replace(",", ".")}</span>
+                </div>
+            """, unsafe_allow_html=True)
 
-        st.subheader("💰 Uplift € per winkel")
-        chart_df = df.sort_values("uplift_eur", ascending=False).head(20)
-        fig = px.bar(chart_df, x="store_name", y="uplift_eur")
-        fig.update_layout(yaxis_tickprefix="€", margin=dict(l=10,r=10,t=30,b=60))
-        st.plotly_chart(fig, use_container_width=True)
+            # === Output
+            st.subheader("🏆 Top underperformers (laagste CSm²I)")
+            topN = df.sort_values("CSm2I").head(10).copy()
+            topN["uplift_eur_fmt"] = topN["uplift_eur"].map(lambda x: f"€{x:,.0f}".replace(",", "."))
+            st.dataframe(topN[["store_name","shop_id","CSm2I","uplift_eur_fmt"]], use_container_width=True)
 
-        st.subheader("🧭 SPV vs Visitors/m²")
-        df["uplift_size"] = df["uplift_eur"].fillna(0).clip(lower=0)
-        fig2 = px.scatter(df, x="sales_per_visitor", y="visitors_per_sqm",
-                          size="uplift_size", color="CSm2I",
-                          hover_data=["store_name","shop_id","CSm2I","uplift_eur"])
-        fig2.update_layout(margin=dict(l=10,r=10,t=30,b=10))
-        st.plotly_chart(fig2, use_container_width=True)
+            st.subheader("💰 Uplift € per winkel")
+            chart_df = df.sort_values("uplift_eur", ascending=False).head(20)
+            fig = px.bar(chart_df, x="store_name", y="uplift_eur",
+                         hover_data={"store_name": True, "uplift_eur": ":,.0f", "CSm2I": ":.2f"})
+            fig.update_layout(yaxis_tickprefix="€", margin=dict(l=10,r=10,t=30,b=60))
+            st.plotly_chart(fig, use_container_width=True)
 
-        st.subheader("📥 Export")
-        export_cols = ["store_name","shop_id","sq_meter","count_in","sales_per_visitor",
-                       "sales_per_sqm","turnover","visitors_per_sqm","expected_spsqm",
-                       "actual_spsqm","CSm2I","uplift_eur"]
-        csv = df[export_cols].to_csv(index=False).encode("utf-8")
-        st.download_button("Download CSV", data=csv, file_name="sales_per_sqm_potential.csv", mime="text/csv")
+            st.subheader("🧭 SPV vs Visitors/m²")
+            df["uplift_size"] = df["uplift_eur"].fillna(0).clip(lower=0)
+            fig2 = px.scatter(df, x="sales_per_visitor", y="visitors_per_sqm",
+                              size="uplift_size", color="CSm2I",
+                              hover_data=["store_name","shop_id","CSm2I","uplift_eur"])
+            fig2.update_layout(margin=dict(l=10,r=10,t=30,b=10), xaxis_title="Sales per Visitor", yaxis_title="Visitors per m²")
+            st.plotly_chart(fig2, use_container_width=True)
 
-    except Exception as e:
-        st.error(f"Onverwachte fout: {e}")
+            st.subheader("📥 Export")
+            export_cols = ["store_name","shop_id","sq_meter","count_in","sales_per_visitor",
+                           "sales_per_sqm","turnover","visitors_per_sqm","expected_spsqm",
+                           "actual_spsqm","CSm2I","uplift_eur"]
+            csv = df[export_cols].to_csv(index=False).encode("utf-8")
+            st.download_button("Download CSV", data=csv, file_name="sales_per_sqm_potential.csv", mime="text/csv")
+
+        except Exception as e:
+            st.error(f"Onverwachte fout: {e}")
