@@ -114,6 +114,12 @@ def _to_float(x):
     except Exception:
         return np.nan
 
+def _eur(num, decimals=2):
+    if pd.isna(num):
+        return ""
+    s = f"{float(num):,.{decimals}f}"
+    return "€" + s.replace(",", "X").replace(".", ",").replace("X", ".")
+
 # === Parser (genest + plat) met aggregatie naar 1 regel per winkel
 def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str], period_key: str) -> pd.DataFrame:
     if not isinstance(payload, dict):
@@ -168,7 +174,7 @@ def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str], period
     return pd.DataFrame()
 
 # === Analyse-run (uniforme workflow: Run simulation)
-if st.button("Run simulation"):  # zelfde label als je andere apps
+if st.button("Run simulation"):
     with st.spinner("Calculating hidden location potential..."):
         try:
             metrics = [
@@ -201,7 +207,7 @@ if st.button("Run simulation"):  # zelfde label als je andere apps
                 st.stop()
 
             # === Berekeningen (CSm²I & uplift)
-            df["store_name"] = df["shop_id"].map(ID_TO_NAME)
+            df["Store"] = df["shop_id"].map(ID_TO_NAME)
             sq = df["sq_meter"].astype(float).replace(0, np.nan)
 
             df["visitors_per_sqm"] = df["count_in"].astype(float) / sq
@@ -212,10 +218,10 @@ if st.button("Run simulation"):  # zelfde label als je andere apps
             df["actual_spsqm"] = np.where(sales_sqm.notna(), sales_sqm, actual_chk)
 
             eps = 1e-9
-            df["CSm2I"] = df["actual_spsqm"] / (df["expected_spsqm"] + eps)
+            df["CSm2I"] = df["actual_spsqm"] / (df["expected_spsqm"] + eps)  # index: 1.00 = op lijn
             df["uplift_eur"] = np.maximum(0.0, df["expected_spsqm"] - df["actual_spsqm"]) * sq
 
-            # === KPI-banner bovenaan (uniform met je andere apps)
+            # === KPI-banner bovenaan
             total_extra_turnover = float(df["uplift_eur"].sum())
             st.markdown(f"""
                 <div style='background-color: #FEAC76;
@@ -227,37 +233,84 @@ if st.button("Run simulation"):  # zelfde label als je andere apps
                             text-align: center;
                             margin-bottom: 1.5rem;'>
                     🚀 The potential revenue growth is
-                    <span style='font-size:1.5rem;'>€{str(f"{total_extra_turnover:,.0f}").replace(",", ".")}</span>
+                    <span style='font-size:1.5rem;'>{_eur(total_extra_turnover, 0)}</span>
                 </div>
             """, unsafe_allow_html=True)
 
-            # === Output
-            st.subheader("🏆 Top underperformers (laagste CSm²I)")
-            topN = df.sort_values("CSm2I").head(10).copy()
-            topN["uplift_eur_fmt"] = topN["uplift_eur"].map(lambda x: f"€{x:,.0f}".replace(",", "."))
-            st.dataframe(topN[["store_name","shop_id","CSm2I","uplift_eur_fmt"]], use_container_width=True)
+            # === Tabel (opgeschoond + EU formats)
+            df_view = pd.DataFrame({
+                "Store": df["Store"],
+                "Square meters": (sq).round(0).astype("Int64"),
+                "Current Avg Sales per sqm": df["actual_spsqm"].round(2).map(lambda v: _eur(v, 2)),
+                "CSm²I (index)": df["CSm2I"].round(2),
+                "Potential revenue uplift (€)": df["uplift_eur"].round(0).map(lambda v: _eur(v, 0)),
+            })
+            st.subheader("🏆 Stores with most potential (sorted by uplift)")
+            st.dataframe(
+                df_view.sort_values("Potential revenue uplift (€)", ascending=False),
+                use_container_width=True
+            )
 
-            st.subheader("💰 Uplift € per winkel")
-            chart_df = df.sort_values("uplift_eur", ascending=False).head(20)
-            fig = px.bar(chart_df, x="store_name", y="uplift_eur",
-                         hover_data={"store_name": True, "uplift_eur": ":,.0f", "CSm2I": ":.2f"})
-            fig.update_layout(yaxis_tickprefix="€", margin=dict(l=10,r=10,t=30,b=60))
+            # === Bar chart (EU hover, betere schaal)
+            chart_df = df[["Store","uplift_eur","CSm2I"]].copy()
+            chart_df["uplift_eur_fmt"] = chart_df["uplift_eur"].map(lambda v: _eur(v, 0))
+            fig = px.bar(
+                chart_df.sort_values("uplift_eur", ascending=False).head(20),
+                x="Store", y="uplift_eur",
+                custom_data=["uplift_eur_fmt","CSm2I"]
+            )
+            fig.update_traces(
+                hovertemplate="<b>%{x}</b><br>Uplift: %{customdata[0]}<br>CSm²I: %{customdata[1]:.2f}<extra></extra>"
+            )
+            fig.update_layout(
+                margin=dict(l=10,r=10,t=30,b=60),
+                yaxis_title="Potential revenue uplift (€)",
+            )
             st.plotly_chart(fig, use_container_width=True)
 
-            st.subheader("🧭 SPV vs Visitors/m²")
-            df["uplift_size"] = df["uplift_eur"].fillna(0).clip(lower=0)
-            fig2 = px.scatter(df, x="sales_per_visitor", y="visitors_per_sqm",
-                              size="uplift_size", color="CSm2I",
-                              hover_data=["store_name","shop_id","CSm2I","uplift_eur"])
-            fig2.update_layout(margin=dict(l=10,r=10,t=30,b=10), xaxis_title="Sales per Visitor", yaxis_title="Visitors per m²")
+            # === Scatter (EU hover + slimme x-as range)
+            sc = df[["Store","sales_per_visitor","visitors_per_sqm","CSm2I","uplift_eur"]].copy()
+            sc["uplift_eur_fmt"] = sc["uplift_eur"].map(lambda v: _eur(v, 0))
+
+            # x-as range smart: 5% marge rond min/max; geen onnodige whitespace
+            x_min = float(np.nanmin(sc["sales_per_visitor"]))
+            x_max = float(np.nanmax(sc["sales_per_visitor"]))
+            span = max(0.01, x_max - x_min)
+            pad = span * 0.05
+            x_range = [x_min - pad, x_max + pad]
+
+            fig2 = px.scatter(
+                sc, x="sales_per_visitor", y="visitors_per_sqm",
+                size="uplift_eur", color="CSm2I",
+                hover_data={"Store": True, "sales_per_visitor": ":.2f", "visitors_per_sqm": ":.2f"},
+                custom_data=["Store","uplift_eur_fmt","CSm2I"]
+            )
+            fig2.update_traces(
+                hovertemplate="<b>%{customdata[0]}</b><br>"
+                              "Uplift: %{customdata[1]}<br>"
+                              "CSm²I: %{customdata[2]:.2f}<br>"
+                              "SPV: %{x:.2f}<br>"
+                              "Visitors/m²: %{y:.2f}"
+                              "<extra></extra>"
+            )
+            fig2.update_layout(
+                margin=dict(l=10,r=10,t=30,b=10),
+                xaxis_title="Sales per Visitor",
+                yaxis_title="Visitors per m²",
+                xaxis=dict(range=x_range)
+            )
             st.plotly_chart(fig2, use_container_width=True)
 
-            st.subheader("📥 Export")
-            export_cols = ["store_name","shop_id","sq_meter","count_in","sales_per_visitor",
-                           "sales_per_sqm","turnover","visitors_per_sqm","expected_spsqm",
-                           "actual_spsqm","CSm2I","uplift_eur"]
-            csv = df[export_cols].to_csv(index=False).encode("utf-8")
-            st.download_button("Download CSV", data=csv, file_name="sales_per_sqm_potential.csv", mime="text/csv")
+            # === Korte toelichting
+            st.markdown(
+                """
+                **Toelichting**  
+                - **CSm²I (index)**: verhouding tussen gerealiseerde en verwachte omzet per m².  
+                  *1,00* = conform verwachting; *<1,00* betekent onderprestatie.  
+                - **Potential revenue uplift (€)**: indicatie van extra omzet wanneer winkel naar **verwacht niveau** groeit.
+                - Verwacht niveau = *(sales per visitor) × (visitors per m²)*.
+                """
+            )
 
         except Exception as e:
             st.error(f"Onverwachte fout: {e}")
