@@ -1,22 +1,22 @@
-import streamlit as st
-import sys
+# streamlit_sales_per_sqm_potential.py
 import os
+import sys
 import numpy as np
 import pandas as pd
 import requests
+import streamlit as st
 import plotly.express as px
-from datetime import date
 
-# 👇 Zet dit vóór de import!
+# Pad één niveau omhoog zodat we gedeelde modules kunnen importeren
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
 
-# ✅ Nu pas importeren
+# Jouw util & mapping
 from data_transformer import normalize_vemcount_response
 from shop_mapping import SHOP_NAME_MAP
 
 st.set_page_config(page_title="Sales-per-sqm Potentieel", page_icon="📊", layout="wide")
 
-# === Styling (compact, jouw primary-knop) ===
+# --- Styling ---
 PFM_RED = "#F04438"
 st.markdown(
     f"""
@@ -42,10 +42,9 @@ st.title("📊 Sales-per-sqm Potentieel (CSm²I)")
 st.caption("Naamselectie via SHOP_NAME_MAP, NVO (sq_meter) via API, presets als in Storescan. URL uit Streamlit secrets.")
 
 # =========================
-# Inputs (in main)
+# Inputs in main
 # =========================
 colA, colB, colC = st.columns([1,1,1])
-
 with colA:
     st.markdown("**Testmodus**")
     mock_mode = st.toggle("Gebruik mock data", value=False)
@@ -62,7 +61,6 @@ with colB:
     period = st.selectbox("", options=PRESETS, index=4, label_visibility="collapsed")
 
 with colC:
-    # Laat API_URL niet zien; we pakken 'm uit secrets
     try:
         API_URL = st.secrets["API_URL"]  # bv. "https://vemcount-agent.onrender.com/get-report"
         st.markdown("**API-config**")
@@ -72,14 +70,13 @@ with colC:
         st.stop()
 
 # =========================
-# Naam <-> ID mapping
+# Naam <-> ID mapping en selectie op NAAM
 # =========================
 NAME_TO_ID = {v: k for k, v in SHOP_NAME_MAP.items()}
 ID_TO_NAME = {k: v for k, v in SHOP_NAME_MAP.items()}
 DEFAULT_SHOP_IDS = list(SHOP_NAME_MAP.keys())
 default_names = [ID_TO_NAME.get(shop_id, str(shop_id)) for shop_id in DEFAULT_SHOP_IDS]
 
-# Selectie op NAAM (zoals je andere tools)
 selected_names = st.multiselect("Select stores", options=list(NAME_TO_ID.keys()), default=default_names)
 shop_ids = [NAME_TO_ID[name] for name in selected_names]
 
@@ -92,7 +89,7 @@ if not shop_ids:
 # =========================
 def build_query_url(api_full_url: str, period: str, shop_ids: list[int], metrics: list[str]) -> str:
     """
-    Maakt een querystring met herhaalde data= en data_output= (zonder []), aansluitend achter API_URL.
+    Bouwt querystring met herhaalde data= en data_output= (zonder []) achter de volledige API_URL.
     Voorbeeld: <API_URL>?source=shops&period=this_month&data=32224&data_output=count_in&...
     """
     params = [("source", "shops"), ("period", period)]
@@ -112,7 +109,7 @@ def fetch_report(api_full_url: str, period: str, shop_ids: list[int], metrics: l
 
 def parse_flat(payload: dict, shop_ids: list[int], fields: list[str]) -> pd.DataFrame:
     """
-    Verwacht minimaal: {"data": {"<shop_id>": { metric: value, ...}}}
+    Eenvoudige parser voor payloads van vorm: {"data": {"<shop_id>": { metric: value, ...}}}
     """
     rows = []
     if payload and isinstance(payload, dict) and "data" in payload:
@@ -162,51 +159,80 @@ if st.button("Analyseer", type="primary"):
         ]
 
         with st.spinner("Data ophalen en berekenen…"):
-            # API-call
+            # 1) Haal payload op (of mock)
             if mock_mode:
                 payload, url = None, build_query_url(API_URL, period, shop_ids, metrics)
             else:
                 payload, url = fetch_report(API_URL, period, shop_ids, metrics)
 
-            st.caption(f"API‑call opgebouwd ✅")
-
-            # Dataframe opbouwen
+            # 2) Bouw dataframe met fallback op jouw normalizer
             if mock_mode or payload is None:
                 df = make_mock_dataframe(shop_ids)
             else:
-                df = parse_flat(payload, shop_ids, fields=metrics)
+                try:
+                    df_norm = normalize_vemcount_response(payload)
+                    # Aggregeer naar 1 regel per shop_id
+                    agg = {
+                        "count_in": "sum",
+                        "turnover": "sum",
+                        "sq_meter": "mean",
+                        "sales_per_sqm": "mean",
+                        "sales_per_visitor": "mean",
+                        "conversion_rate": "mean",
+                        "sales_per_transaction": "mean",
+                    }
+                    use_cols = [c for c in agg.keys() if c in df_norm.columns]
+                    df = (df_norm[df_norm["shop_id"].isin(shop_ids)]
+                          .groupby("shop_id", as_index=False)[use_cols].agg(agg))
+                except Exception:
+                    # Val terug op platte parser
+                    df = parse_flat(payload, shop_ids, fields=metrics)
 
-            # Store namen erbij
+            # 3) Guardrails: verplichte velden + non-empty
+            required = ["shop_id","count_in","turnover","sq_meter"]
+            missing = [c for c in required if c not in df.columns]
+            if missing or df.empty:
+                st.error(f"Geen bruikbare data uit API. Ontbrekende velden: {missing}. "
+                         "Zet desnoods tijdelijk ‘Gebruik mock data’ aan om de UI te testen.")
+                st.stop()
+
+            # 4) Voeg store namen toe
             df["store_name"] = df["shop_id"].map(ID_TO_NAME)
 
-            # Kernberekeningen
-            df["visitors_per_sqm"] = df["count_in"] / df["sq_meter"].replace(0, np.nan)
-            df["expected_spsqm"]   = df["sales_per_visitor"] * df["visitors_per_sqm"]
-            df["actual_spsqm_chk"] = df["turnover"] / df["sq_meter"].replace(0, np.nan)
+            # 5) Veilige kernberekeningen (geen NaN/Inf)
+            eps = 1e-9
+            sq = df["sq_meter"].replace(0, np.nan)
 
-            # Sanity check: als sales_per_sqm >10% afwijkt van turnover/sq_meter, gebruik turnover-based
-            cond = (
-                (df["sales_per_sqm"].astype(float) > 0) &
-                (np.abs(df["actual_spsqm_chk"] - df["sales_per_sqm"]) / df["sales_per_sqm"] > 0.10)
+            df["visitors_per_sqm"] = df["count_in"] / sq
+            df["expected_spsqm"]   = df.get("sales_per_visitor", 0) * df["visitors_per_sqm"]
+
+            actual_chk = df["turnover"] / sq
+            sales_sqm = df.get("sales_per_sqm", pd.Series(np.nan, index=df.index))
+            needs_chk = sales_sqm.isna() | (
+                (sales_sqm > 0) & ((actual_chk - sales_sqm).abs() / (sales_sqm + eps) > 0.10)
             )
-            df["actual_spsqm"] = df["sales_per_sqm"].where(~cond, df["actual_spsqm_chk"])
+            df["actual_spsqm"] = sales_sqm
+            df.loc[needs_chk, "actual_spsqm"] = actual_chk
 
-            # Index & uplift
-            df["CSm2I"] = df["actual_spsqm"] / df["expected_spsqm"].replace(0, np.nan)
-            df["uplift_eur"] = np.maximum(0.0, df["expected_spsqm"] - df["actual_spsqm"]) * df["sq_meter"]
+            df["CSm2I"] = (df["actual_spsqm"] / (df["expected_spsqm"] + eps)).replace([np.inf, -np.inf], np.nan)
+            df["uplift_eur"] = np.maximum(0.0, (df["expected_spsqm"] - df["actual_spsqm"]).fillna(0)) * sq
 
-            # Drivers (vs medians)
-            med_spv = df["sales_per_visitor"].median(skipna=True)
+            # Drivers op basis van medianen
+            med_spv = df.get("sales_per_visitor", pd.Series([np.nan])).median(skipna=True)
             med_vps = df["visitors_per_sqm"].median(skipna=True)
             df["driver_flag"] = np.select(
                 [
-                    (df["sales_per_visitor"] < med_spv) & (df["visitors_per_sqm"] >= med_vps),
-                    (df["sales_per_visitor"] >= med_spv) & (df["visitors_per_sqm"] < med_vps),
-                    (df["sales_per_visitor"] < med_spv) & (df["visitors_per_sqm"] < med_vps),
+                    (df.get("sales_per_visitor", 0) < med_spv) & (df["visitors_per_sqm"] >= med_vps),
+                    (df.get("sales_per_visitor", 0) >= med_spv) & (df["visitors_per_sqm"] < med_vps),
+                    (df.get("sales_per_visitor", 0) < med_spv) & (df["visitors_per_sqm"] < med_vps),
                 ],
                 ["Low SPV", "Low density", "Low SPV + density"],
                 default="OK"
             )
+
+            # Schoon voor visuals
+            df.replace([np.inf, -np.inf], np.nan, inplace=True)
+            df["uplift_size"] = df["uplift_eur"].fillna(0).clip(lower=0)
 
         # =========================
         # Output
@@ -240,7 +266,8 @@ if st.button("Analyseer", type="primary"):
         st.subheader("🧭 SPV vs Visitors/m²")
         fig2 = px.scatter(
             df, x="sales_per_visitor", y="visitors_per_sqm",
-            size="uplift_eur", color="CSm2I",
+            size="uplift_size",  # veilige size (geen NaN)
+            color="CSm2I",
             hover_data=["store_name","shop_id","CSm2I","uplift_eur"]
         )
         fig2.update_layout(margin=dict(l=10,r=10,t=30,b=10), xaxis_title="Sales per Visitor", yaxis_title="Visitors per m²")
