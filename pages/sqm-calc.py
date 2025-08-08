@@ -25,7 +25,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 st.title("📊 Sales-per-sqm Potentieel (CSm²I)")
-st.caption("Naamselectie via SHOP_NAME_MAP, NVO (sq_meter) via API. Periode + period_step instelbaar. API-URL uit Streamlit secrets.")
+st.caption("Naamselectie via SHOP_NAME_MAP, NVO (sq_meter) via API. Periode + period_step instelbaar. API-URL & API-TOKEN uit Streamlit secrets.")
 
 # -------- Invoer --------
 colA, colB, colC, colD = st.columns([1,1,1,1])
@@ -40,10 +40,9 @@ with colC:
     period_step = st.selectbox("Period Step", options=PERIOD_STEPS, index=1)
 with colD:
     API_URL = st.secrets.get("API_URL", "").strip()
-    if not API_URL:
-        st.warning("API_URL ontbreekt in secrets. Vul tijdelijk hieronder in (zet 'm later in `.streamlit/secrets.toml`).")
-        API_URL = st.text_input("API URL", value="", placeholder="https://vemcount-agent.onrender.com/get-report")
-    if not API_URL:
+    API_TOKEN = st.secrets.get("API_TOKEN", "").strip()
+    if not API_URL or not API_TOKEN:
+        st.error("❌ API_URL of API_TOKEN ontbreekt in `.streamlit/secrets.toml`. Voeg deze toe om verder te gaan.")
         st.stop()
 
 # Mapping
@@ -56,10 +55,9 @@ if not shop_ids:
     st.warning("Selecteer minimaal één store.")
     st.stop()
 
-# -------- API call (exact als werkende calculators) --------
+# -------- API call (met verplichte Bearer) --------
 def fetch_report(api_url: str, period: str, shop_ids: list[int], metrics: list[str], step: str):
-    token = st.secrets.get("API_TOKEN", "").strip()
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    headers = {"Authorization": f"Bearer {API_TOKEN}"}
 
     params = [
         ("source", "shops"),
@@ -86,9 +84,14 @@ def fetch_report(api_url: str, period: str, shop_ids: list[int], metrics: list[s
     except Exception:
         js = {}
 
+    # Mask token in debug
+    debug_headers = {**headers}
+    if "Authorization" in debug_headers:
+        debug_headers["Authorization"] = "Bearer ***masked***"
+
     req_info = {
         "url": final_url,
-        "headers": headers,
+        "headers": debug_headers,
         "params_list": params
     }
     return js, req_info, status, text_preview
