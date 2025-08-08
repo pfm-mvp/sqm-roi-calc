@@ -33,7 +33,7 @@ st.caption("Naamselectie via SHOP_NAME_MAP, NVO (sq_meter) via API. Periode + pe
 # === Secrets (exact als je andere calculators)
 API_URL = st.secrets["API_URL"]
 
-# === UI inputs (zoals elders)
+# === UI inputs
 colA, colB, colC = st.columns([1,1,1])
 with colA:
     mock_mode = st.toggle("Gebruik mock data", value=False)
@@ -45,7 +45,7 @@ with colC:
     PERIOD_STEPS = ["hour","day","week","month","quarter","year","total"]
     period_step = st.selectbox("Period Step", options=PERIOD_STEPS, index=1)
 
-# === Naam ↔ ID mapping (zoals in je andere tools)
+# === Naam ↔ ID mapping
 NAME_TO_ID = {v: k for k, v in SHOP_NAME_MAP.items()}
 ID_TO_NAME = {k: v for k, v in SHOP_NAME_MAP.items()}
 default_names = [ID_TO_NAME[i] for i in SHOP_NAME_MAP.keys()]
@@ -69,10 +69,6 @@ def fetch_report(api_url: str, shop_ids: list[int], period: str, step: str, metr
         ("weather", "0"),
     ]
 
-    # Debug: toon precies wat we sturen, net als de andere calcs
-    debug_payload = list(params)
-
-    # POST met querystring via params= (requests behandelt herhaalde keys correct)
     r = requests.post(api_url, params=params, timeout=40)
     status = r.status_code
     text_preview = r.text[:2000] if r.text else ""
@@ -81,20 +77,77 @@ def fetch_report(api_url: str, shop_ids: list[int], period: str, step: str, metr
     except Exception:
         js = {}
 
-    req_info = {"url": api_url, "params_list": debug_payload}
+    req_info = {"url": api_url, "params_list": params}
     return js, req_info, status, text_preview
 
-# === Parser (platte 'data' structuur; kan later uitgebreid naar 'dates')
-def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str]) -> pd.DataFrame:
+# === Helpers
+def _to_float(x):
+    if x is None or x == "":
+        return np.nan
+    try:
+        # strings zoals "38.8" of "1836.8" -> float
+        return float(x)
+    except Exception:
+        return np.nan
+
+# === Parser die zowel platte 'data' als geneste 'data -> <period> -> <shop> -> dates' ondersteunt
+def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str], period_key: str) -> pd.DataFrame:
+    if not isinstance(payload, dict):
+        return pd.DataFrame()
+
     rows = []
-    if isinstance(payload, dict) and "data" in payload and isinstance(payload["data"], dict):
+
+    # Case A: geneste structuur (zoals je preview toonde)
+    # payload["data"][period_key][shop_id]["dates"][<label>]["data"]->{metrics}
+    if "data" in payload and isinstance(payload["data"], dict) and period_key in payload["data"]:
+        per = payload["data"].get(period_key, {})
+        for sid in shop_ids:
+            shop_block = per.get(str(sid)) or per.get(int(sid))  # veiligheid
+            if not isinstance(shop_block, dict):
+                continue
+
+            dates = shop_block.get("dates", {})
+            for _, day_info in dates.items():
+                day_data = (day_info or {}).get("data", {}) or {}
+                row = {"shop_id": sid}
+                for f in fields:
+                    row[f] = _to_float(day_data.get(f))
+                # Sommige responses zetten sq_meter ook op dag-niveau als string → fix
+                if row.get("sq_meter") is None or np.isnan(row.get("sq_meter")):
+                    # fallback: shop meta (shop_block["data"]["sq_meter"])
+                    sm = ((shop_block.get("data") or {}).get("sq_meter"))
+                    row["sq_meter"] = _to_float(sm)
+                rows.append(row)
+
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows)
+
+        # Aggregatie naar 1 regel per winkel
+        agg = {}
+        for f in fields:
+            if f in ["count_in", "turnover"]:
+                agg[f] = "sum"     # telwaarden cumuleren over dagen
+            elif f in ["sq_meter"]:
+                agg[f] = "max"     # NVO is constant; neem max/laatste
+            else:
+                agg[f] = "mean"    # ratio's/dichtheden middelen over periode
+
+        return df.groupby("shop_id", as_index=False).agg(agg)
+
+    # Case B: platte structuur {"data": {"<shop_id>": { metric: value, ...}}}
+    if "data" in payload and isinstance(payload["data"], dict):
+        flat = []
         for sid in shop_ids:
             rec = payload["data"].get(str(sid), {}) or {}
             row = {"shop_id": sid}
             for f in fields:
-                row[f] = rec.get(f, np.nan)
-            rows.append(row)
-    return pd.DataFrame(rows)
+                row[f] = _to_float(rec.get(f))
+            flat.append(row)
+        return pd.DataFrame(flat)
+
+    return pd.DataFrame()
 
 # === Mock data (voor snelle local test)
 def make_mock_dataframe(shop_ids: list[int], rng_seed=42) -> pd.DataFrame:
@@ -141,24 +194,27 @@ if st.button("Analyseer", type="primary"):
                 st.error(f"API gaf status {status}. Zie debug hierboven.")
                 st.stop()
 
-            df = parse_vemcount(payload, shop_ids, fields=metrics)
+            df = parse_vemcount(payload, shop_ids, fields=metrics, period_key=period)
 
         if df.empty:
-            st.error("Geen data (na parsen). Check periode/step en debug.")
+            st.error("Geen data (na parsen/aggregatie). Check periode/step en debug.")
             st.stop()
 
         # === Berekeningen (CSm²I & uplift)
         df["store_name"] = df["shop_id"].map(ID_TO_NAME)
-        sq = df["sq_meter"].replace(0, np.nan)
+        sq = df["sq_meter"].astype(float).replace(0, np.nan)
 
-        df["visitors_per_sqm"] = df["count_in"] / sq
-        df["expected_spsqm"]   = df["sales_per_visitor"] * df["visitors_per_sqm"]
+        df["visitors_per_sqm"] = df["count_in"].astype(float) / sq
+        df["expected_spsqm"]   = df["sales_per_visitor"].astype(float) * df["visitors_per_sqm"]
 
-        actual_chk = df["turnover"] / sq
-        sales_sqm = df.get("sales_per_sqm", pd.Series(np.nan, index=df.index))
+        actual_chk = df["turnover"].astype(float) / sq
+        sales_sqm = df.get("sales_per_sqm", pd.Series(np.nan, index=df.index)).astype(float)
+        # gebruik sales_per_sqm indien aanwezig; anders turnover/sq_meter
         df["actual_spsqm"] = np.where(sales_sqm.notna(), sales_sqm, actual_chk)
 
-        df["CSm2I"] = df["actual_spsqm"] / df["expected_spsqm"]
+        # Index en uplift
+        eps = 1e-9
+        df["CSm2I"] = df["actual_spsqm"] / (df["expected_spsqm"] + eps)
         df["uplift_eur"] = np.maximum(0.0, df["expected_spsqm"] - df["actual_spsqm"]) * sq
 
         # === Output
@@ -181,7 +237,7 @@ if st.button("Analyseer", type="primary"):
         fig2.update_layout(margin=dict(l=10,r=10,t=30,b=10))
         st.plotly_chart(fig2, use_container_width=True)
 
-        # Export
+        st.subheader("📥 Export")
         export_cols = ["store_name","shop_id","sq_meter","count_in","sales_per_visitor",
                        "sales_per_sqm","turnover","visitors_per_sqm","expected_spsqm",
                        "actual_spsqm","CSm2I","uplift_eur"]
