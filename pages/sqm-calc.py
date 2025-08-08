@@ -54,7 +54,7 @@ if not shop_ids:
     st.warning("Selecteer minimaal één store.")
     st.stop()
 
-# -------------- API-call met [] intact --------------
+# -------------- API-call (POST form-data) --------------
 def fetch_report(api_url: str, period: str, shop_ids: list[int], metrics: list[str], step: str):
     token = st.secrets.get("API_TOKEN", "").strip()
     headers = {"Authorization": f"Bearer {token}"} if token else {}
@@ -71,11 +71,7 @@ def fetch_report(api_url: str, period: str, shop_ids: list[int], metrics: list[s
     for m in metrics:
         params.append(("data_output[]", m))
 
-    # Handmatige querystring bouwen zodat [] niet ge-escaped worden
-    qs = "&".join(f"{k}={v}" for k, v in params)
-    final_url = f"{api_url}?{qs}"
-
-    r = requests.post(final_url, headers=headers, timeout=40)
+    r = requests.post(api_url, data=params, headers=headers, timeout=40)
     status = r.status_code
     text_preview = r.text[:2000] if r.text else ""
     try:
@@ -83,7 +79,7 @@ def fetch_report(api_url: str, period: str, shop_ids: list[int], metrics: list[s
     except Exception:
         js = {}
 
-    req_info = {"url": final_url, "headers": headers}
+    req_info = {"url": api_url, "headers": headers, "payload": params}
     return js, req_info, status, text_preview
 
 # -------------- Parser --------------
@@ -128,6 +124,7 @@ if st.button("Analyseer", type="primary"):
             with st.expander("🔧 Request/Response Debug"):
                 st.write("➡️  POST naar:", req_info["url"])
                 st.write("➡️  Headers:", req_info["headers"])
+                st.write("➡️  Payload (form-data):", req_info["payload"])
                 st.write("⬅️  HTTP status:", status)
                 st.write("⬅️  Response preview:"); st.code(text_preview or "<empty>")
             if status != 200:
