@@ -1,3 +1,5 @@
+import pandas as pd
+
 def normalize_vemcount_response(response_json: dict) -> pd.DataFrame:
     rows = []
 
