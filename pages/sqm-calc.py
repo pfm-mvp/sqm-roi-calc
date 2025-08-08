@@ -12,7 +12,7 @@ from shop_mapping import SHOP_NAME_MAP
 
 st.set_page_config(page_title="Sales-per-sqm Potentieel (CSm²I)", page_icon="📊", layout="wide")
 
-# === Styling (zelfde look & feel)
+# === Styling
 PFM_RED = "#F04438"
 st.markdown(f"""
 <style>
@@ -30,11 +30,10 @@ st.markdown(f"""
 st.title("📊 Sales-per-sqm Potentieel (CSm²I)")
 st.caption("Naamselectie via SHOP_NAME_MAP, NVO (sq_meter) via API. Periode + period_step instelbaar. Secrets via Streamlit.")
 
-# === Secrets (exact als je andere calculators)
+# === Secrets (zelfde als andere calcs)
 API_URL = st.secrets["API_URL"]
-API_TOKEN = st.secrets["API_TOKEN"]
 
-# === UI inputs (zelfde patroon)
+# === UI inputs
 colA, colB, colC = st.columns([1,1,1])
 with colA:
     mock_mode = st.toggle("Gebruik mock data", value=False)
@@ -46,7 +45,7 @@ with colC:
     PERIOD_STEPS = ["hour","day","week","month","quarter","year","total"]
     period_step = st.selectbox("Period Step", options=PERIOD_STEPS, index=1)
 
-# === Naam ↔ ID mapping (zoals elders)
+# === Naam ↔ ID mapping
 NAME_TO_ID = {v: k for k, v in SHOP_NAME_MAP.items()}
 ID_TO_NAME = {k: v for k, v in SHOP_NAME_MAP.items()}
 default_names = [ID_TO_NAME[i] for i in SHOP_NAME_MAP.keys()]
@@ -56,10 +55,8 @@ if not shop_ids:
     st.warning("Selecteer minimaal één store.")
     st.stop()
 
-# === API call — exact zoals je werkende calculators (POST met querystring, Bearer verplicht)
+# === API call (zelfde als zaterdag-calculator)
 def fetch_report(api_url: str, period: str, shop_ids: list[int], metrics: list[str], step: str):
-    headers = {"Authorization": f"Bearer {API_TOKEN}"}
-
     params = [
         ("source", "shops"),
         ("period", period),
@@ -72,12 +69,7 @@ def fetch_report(api_url: str, period: str, shop_ids: list[int], metrics: list[s
     for m in metrics:
         params.append(("data_output[]", m))
 
-    # Querystring zelf bouwen zodat [] niet ge-escaped worden
-    query = "&".join(f"{k}={v}" for k, v in params)
-    final_url = f"{api_url}?{query}"
-
-    r = requests.post(final_url, headers=headers, timeout=40)
-
+    r = requests.post(api_url, params=params, timeout=40)
     status = r.status_code
     text_preview = r.text[:2000] if r.text else ""
     try:
@@ -85,13 +77,10 @@ def fetch_report(api_url: str, period: str, shop_ids: list[int], metrics: list[s
     except Exception:
         js = {}
 
-    # Mask token in debug
-    dbg_headers = {"Authorization": "Bearer ***masked***"}
-
-    req_info = {"url": final_url, "headers": dbg_headers, "params_list": params}
+    req_info = {"url": api_url, "params_list": params}
     return js, req_info, status, text_preview
 
-# === Parser (platte 'data' structuur; kan later uitgebreid worden met 'dates' indien nodig)
+# === Parser
 def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str]) -> pd.DataFrame:
     rows = []
     if isinstance(payload, dict) and "data" in payload and isinstance(payload["data"], dict):
@@ -103,7 +92,7 @@ def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str]) -> pd.
             rows.append(row)
     return pd.DataFrame(rows)
 
-# === Mock data (voor snelle local test)
+# === Mock data
 def make_mock_dataframe(shop_ids: list[int], rng_seed=42) -> pd.DataFrame:
     rng = np.random.default_rng(rng_seed); n = len(shop_ids)
     sq = rng.uniform(90, 250, size=n); count_in = rng.integers(6000, 24000, size=n)
@@ -137,10 +126,9 @@ if st.button("Analyseer", type="primary"):
         else:
             payload, req_info, status, text_preview = fetch_report(API_URL, period, shop_ids, metrics, step=period_step)
 
-            # Debug zoals je gewend bent
+            # Debug expander
             with st.expander("🔧 Request/Response Debug"):
                 st.write("➡️  POST naar:", req_info["url"])
-                st.write("➡️  Headers:", req_info["headers"])
                 st.write("➡️  Params list:", req_info["params_list"])
                 st.write("⬅️  HTTP status:", status)
                 st.write("⬅️  Response preview:"); st.code(text_preview or "<empty>")
@@ -155,7 +143,7 @@ if st.button("Analyseer", type="primary"):
             st.error("Geen data (na parsen). Check periode/period_step en debug.")
             st.stop()
 
-        # === Berekeningen (CSm²I & uplift)
+        # === Berekeningen
         df["store_name"] = df["shop_id"].map(ID_TO_NAME)
         sq = df["sq_meter"].replace(0, np.nan)
 
