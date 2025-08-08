@@ -7,6 +7,11 @@ import numpy as np
 import streamlit as st
 import plotly.express as px
 from fpdf import FPDF
+
+# 👇 Zet dit vóór de import!
+sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
+
+# ✅ Nu pas importeren
 from shop_mapping import SHOP_NAME_MAP
 
 # === PAGE CONFIG ===
