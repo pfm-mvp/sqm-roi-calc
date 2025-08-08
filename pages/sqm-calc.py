@@ -9,7 +9,7 @@ import plotly.express as px
 
 # Pad één niveau omhoog zodat we shop_mapping kunnen importeren
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
-from shop_mapping import SHOP_NAME_MAP  # ✅ data_transformer import verwijderd
+from shop_mapping import SHOP_NAME_MAP  # let op: geen data_transformer import meer
 
 st.set_page_config(page_title="Sales-per-sqm Potentieel", page_icon="📊", layout="wide")
 
@@ -36,7 +36,7 @@ st.markdown(
 )
 
 st.title("📊 Sales-per-sqm Potentieel (CSm²I)")
-st.caption("Naamselectie via SHOP_NAME_MAP, NVO (sq_meter) via API, presets als in Storescan. URL uit Streamlit secrets.")
+st.caption("Naamselectie via SHOP_NAME_MAP, NVO (sq_meter) via API. Periode + period_step instelbaar. API-URL uit Streamlit secrets.")
 
 # =========================
 # Inputs
@@ -60,10 +60,12 @@ with colC:
     period_step = st.selectbox("Period Step", options=PERIOD_STEPS, index=1)
 
 with colD:
-    try:
-        API_URL = st.secrets["API_URL"]
-    except KeyError:
-        st.error("API_URL ontbreekt in Streamlit secrets. Voeg toe aan `.streamlit/secrets.toml`.")
+    # Fallback: als secrets ontbreken, tijdelijk via text_input laten invullen
+    API_URL = st.secrets.get("API_URL", "").strip()
+    if not API_URL:
+        st.warning("API_URL ontbreekt in secrets. Vul tijdelijk hieronder in (zet 'm later in `.streamlit/secrets.toml`).")
+        API_URL = st.text_input("API URL", value="", placeholder="https://vemcount-agent.onrender.com/get-report")
+    if not API_URL:
         st.stop()
 
 # =========================
@@ -82,7 +84,7 @@ if not shop_ids:
     st.stop()
 
 # =========================
-# API call (POST met [] keys)
+# API call (POST met [] keys) + DEBUG
 # =========================
 def fetch_report(api_full_url: str, period: str, shop_ids: list[int], metrics: list[str], step: str):
     payload = [
@@ -94,18 +96,39 @@ def fetch_report(api_full_url: str, period: str, shop_ids: list[int], metrics: l
         payload.append(("data[]", sid))
     for m in metrics:
         payload.append(("data_output[]", m))
-    r = requests.post(api_full_url, data=payload, timeout=30)
-    r.raise_for_status()
-    return r.json()
+
+    # Debug: toon wat we sturen
+    req_info = {
+        "url": api_full_url,
+        "payload": payload,
+        "note": "POST x-www-form-urlencoded met data[] en data_output[]"
+    }
+
+    try:
+        r = requests.post(api_full_url, data=payload, timeout=40)
+        status = r.status_code
+        text_preview = r.text[:2000] if r.text else ""
+        # probeer json; als dat faalt, zet payload op {}
+        try:
+            js = r.json()
+        except Exception:
+            js = {}
+        return js, req_info, status, text_preview
+    except Exception as e:
+        return None, req_info, None, f"Request error: {e}"
 
 # =========================
 # Slimme parser
 # =========================
 def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str]) -> pd.DataFrame:
+    """
+    Werkt voor platte 'data' en geneste 'dates'.
+    Aggegreert automatisch naar 1 regel per winkel.
+    """
     rows = []
 
     # CASE 1: Platte structuur
-    if "data" in payload and isinstance(payload["data"], dict):
+    if isinstance(payload, dict) and "data" in payload and isinstance(payload["data"], dict):
         for sid in shop_ids:
             rec = payload["data"].get(str(sid), {}) or {}
             row = {"shop_id": sid}
@@ -115,16 +138,17 @@ def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str]) -> pd.
         return pd.DataFrame(rows)
 
     # CASE 2: Geneste structuur
-    for sid, content in payload.items():
-        if not isinstance(content, dict):
-            continue
-        dates = content.get("dates", {})
-        for date_label, day_info in dates.items():
-            data = day_info.get("data", {})
-            row = {"shop_id": int(sid)}
-            for f in fields:
-                row[f] = data.get(f, np.nan)
-            rows.append(row)
+    if isinstance(payload, dict):
+        for sid, content in payload.items():
+            if not isinstance(content, dict):
+                continue
+            dates = content.get("dates", {})
+            for _, day_info in dates.items():
+                data = day_info.get("data", {})
+                row = {"shop_id": int(sid)}
+                for f in fields:
+                    row[f] = data.get(f, np.nan)
+                rows.append(row)
 
     if not rows:
         return pd.DataFrame()
@@ -184,14 +208,27 @@ if st.button("Analyseer", type="primary"):
         if mock_mode:
             df = make_mock_dataframe(shop_ids)
             st.info("Mock data gebruikt")
+            payload_dbg = {}
+            req_info, status, text_preview = {}, None, ""
         else:
-            payload = fetch_report(API_URL, period, shop_ids, metrics, step=period_step)
-            with st.expander("🔍 API Response Debug"):
-                st.json(payload)
+            payload, req_info, status, text_preview = fetch_report(API_URL, period, shop_ids, metrics, step=period_step)
+
+            # Debug‑expander: request + response preview
+            with st.expander("🔧 Request/Response Debug"):
+                st.write("➡️  POST naar:", req_info.get("url"))
+                st.write("➡️  Payload:", req_info.get("payload"))
+                st.write("⬅️  HTTP status:", status)
+                st.write("⬅️  Response preview (first 2000 chars):")
+                st.code(text_preview if text_preview else "<empty body>")
+
+            if payload is None:
+                st.error("API‑request faalde (zie debug hierboven).")
+                st.stop()
+
             df = parse_vemcount(payload, shop_ids, fields=metrics)
 
         if df.empty:
-            st.error("Geen data ontvangen van API.")
+            st.error("Geen data ontvangen of alle waarden leeg. Check de debug‑sectie hierboven en controleer period & period_step.")
             st.stop()
 
         # Voeg namen toe
