@@ -6,12 +6,13 @@ import requests
 import streamlit as st
 import plotly.express as px
 
-# Pad voor shop_mapping.py
+# Mapping importeren
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
 from shop_mapping import SHOP_NAME_MAP
 
 st.set_page_config(page_title="Sales-per-sqm Potentieel", page_icon="📊", layout="wide")
 
+# Styling
 PFM_RED = "#F04438"
 st.markdown(f"""
 <style>
@@ -26,7 +27,7 @@ st.markdown(f"""
 st.title("📊 Sales-per-sqm Potentieel (CSm²I)")
 st.caption("Naamselectie via SHOP_NAME_MAP, NVO (sq_meter) via API. Periode + period_step instelbaar. API-URL uit Streamlit secrets.")
 
-# ---------------- Inputs ----------------
+# -------- Invoer --------
 colA, colB, colC, colD = st.columns([1,1,1,1])
 with colA:
     mock_mode = st.toggle("Gebruik mock data", value=False)
@@ -45,6 +46,7 @@ with colD:
     if not API_URL:
         st.stop()
 
+# Mapping
 NAME_TO_ID = {v: k for k, v in SHOP_NAME_MAP.items()}
 ID_TO_NAME = {k: v for k, v in SHOP_NAME_MAP.items()}
 default_names = [ID_TO_NAME[i] for i in SHOP_NAME_MAP.keys()]
@@ -54,7 +56,7 @@ if not shop_ids:
     st.warning("Selecteer minimaal één store.")
     st.stop()
 
-# -------------- API-call (POST form-data) --------------
+# -------- API call (uit zaterdag-calculator) --------
 def fetch_report(api_url: str, period: str, shop_ids: list[int], metrics: list[str], step: str):
     token = st.secrets.get("API_TOKEN", "").strip()
     headers = {"Authorization": f"Bearer {token}"} if token else {}
@@ -64,14 +66,14 @@ def fetch_report(api_url: str, period: str, shop_ids: list[int], metrics: list[s
         ("period", period),
         ("period_step", step),
         ("weather", "0"),
-        ("step", step),
+        ("step", step)
     ]
     for sid in shop_ids:
         params.append(("data[]", str(sid)))
     for m in metrics:
         params.append(("data_output[]", m))
 
-    r = requests.post(api_url, data=params, headers=headers, timeout=40)
+    r = requests.post(api_url, params=params, headers=headers, timeout=40)  # <-- params, niet data
     status = r.status_code
     text_preview = r.text[:2000] if r.text else ""
     try:
@@ -79,23 +81,22 @@ def fetch_report(api_url: str, period: str, shop_ids: list[int], metrics: list[s
     except Exception:
         js = {}
 
-    req_info = {"url": api_url, "headers": headers, "payload": params}
+    req_info = {"url": api_url, "headers": headers, "params": params}
     return js, req_info, status, text_preview
 
-# -------------- Parser --------------
+# -------- Parser --------
 def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str]) -> pd.DataFrame:
     rows = []
-    if isinstance(payload, dict) and "data" in payload and isinstance(payload["data"], dict):
+    if isinstance(payload, dict) and "data" in payload:
         for sid in shop_ids:
             rec = payload["data"].get(str(sid), {}) or {}
             row = {"shop_id": sid}
             for f in fields:
                 row[f] = rec.get(f, np.nan)
             rows.append(row)
-        return pd.DataFrame(rows)
-    return pd.DataFrame()
+    return pd.DataFrame(rows)
 
-# -------------- Mock --------------
+# -------- Mock --------
 def make_mock_dataframe(shop_ids: list[int], rng_seed=42) -> pd.DataFrame:
     rng = np.random.default_rng(rng_seed); n = len(shop_ids)
     sq = rng.uniform(90, 250, size=n); count_in = rng.integers(6000, 24000, size=n)
@@ -110,7 +111,7 @@ def make_mock_dataframe(shop_ids: list[int], rng_seed=42) -> pd.DataFrame:
         "turnover": turnover
     })
 
-# -------------- Analyse --------------
+# -------- Analyse --------
 if st.button("Analyseer", type="primary"):
     try:
         metrics = ["count_in","sales_per_visitor","sales_per_sqm",
@@ -124,7 +125,7 @@ if st.button("Analyseer", type="primary"):
             with st.expander("🔧 Request/Response Debug"):
                 st.write("➡️  POST naar:", req_info["url"])
                 st.write("➡️  Headers:", req_info["headers"])
-                st.write("➡️  Payload (form-data):", req_info["payload"])
+                st.write("➡️  Params (querystring):", req_info["params"])
                 st.write("⬅️  HTTP status:", status)
                 st.write("⬅️  Response preview:"); st.code(text_preview or "<empty>")
             if status != 200:
@@ -138,11 +139,9 @@ if st.button("Analyseer", type="primary"):
         sq = df["sq_meter"].replace(0, np.nan)
         df["visitors_per_sqm"] = df["count_in"] / sq
         df["expected_spsqm"] = df["sales_per_visitor"] * df["visitors_per_sqm"]
-
         actual_chk = df["turnover"] / sq
         sales_sqm = df.get("sales_per_sqm", pd.Series(np.nan, index=df.index))
         df["actual_spsqm"] = np.where(sales_sqm.notna(), sales_sqm, actual_chk)
-
         df["CSm2I"] = df["actual_spsqm"] / df["expected_spsqm"]
         df["uplift_eur"] = np.maximum(0.0, df["expected_spsqm"] - df["actual_spsqm"]) * sq
 
