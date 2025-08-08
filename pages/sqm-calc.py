@@ -56,7 +56,7 @@ if not shop_ids:
     st.warning("Selecteer minimaal één store.")
     st.stop()
 
-# -------- API call (uit zaterdag-calculator) --------
+# -------- API call (exact als werkende calculators) --------
 def fetch_report(api_url: str, period: str, shop_ids: list[int], metrics: list[str], step: str):
     token = st.secrets.get("API_TOKEN", "").strip()
     headers = {"Authorization": f"Bearer {token}"} if token else {}
@@ -73,7 +73,12 @@ def fetch_report(api_url: str, period: str, shop_ids: list[int], metrics: list[s
     for m in metrics:
         params.append(("data_output[]", m))
 
-    r = requests.post(api_url, params=params, headers=headers, timeout=40)  # <-- params, niet data
+    # Zelf querystring bouwen om [] intact te houden
+    query = "&".join(f"{k}={v}" for k, v in params)
+    final_url = f"{api_url}?{query}"
+
+    r = requests.post(final_url, headers=headers, timeout=40)
+
     status = r.status_code
     text_preview = r.text[:2000] if r.text else ""
     try:
@@ -81,7 +86,11 @@ def fetch_report(api_url: str, period: str, shop_ids: list[int], metrics: list[s
     except Exception:
         js = {}
 
-    req_info = {"url": api_url, "headers": headers, "params": params}
+    req_info = {
+        "url": final_url,
+        "headers": headers,
+        "params_list": params
+    }
     return js, req_info, status, text_preview
 
 # -------- Parser --------
@@ -125,7 +134,7 @@ if st.button("Analyseer", type="primary"):
             with st.expander("🔧 Request/Response Debug"):
                 st.write("➡️  POST naar:", req_info["url"])
                 st.write("➡️  Headers:", req_info["headers"])
-                st.write("➡️  Params (querystring):", req_info["params"])
+                st.write("➡️  Params list:", req_info["params_list"])
                 st.write("⬅️  HTTP status:", status)
                 st.write("⬅️  Response preview:"); st.code(text_preview or "<empty>")
             if status != 200:
@@ -135,6 +144,7 @@ if st.button("Analyseer", type="primary"):
         if df.empty:
             st.error("Geen data (na parsen). Controleer periode/period_step en debug."); st.stop()
 
+        # -------- Berekeningen --------
         df["store_name"] = df["shop_id"].map(ID_TO_NAME)
         sq = df["sq_meter"].replace(0, np.nan)
         df["visitors_per_sqm"] = df["count_in"] / sq
@@ -145,6 +155,7 @@ if st.button("Analyseer", type="primary"):
         df["CSm2I"] = df["actual_spsqm"] / df["expected_spsqm"]
         df["uplift_eur"] = np.maximum(0.0, df["expected_spsqm"] - df["actual_spsqm"]) * sq
 
+        # -------- Output --------
         st.subheader("🏆 Top underperformers")
         topN = df.sort_values("CSm2I").head(10).copy()
         topN["uplift_eur_fmt"] = topN["uplift_eur"].map(lambda x: f"€{x:,.0f}".replace(",", "."))
