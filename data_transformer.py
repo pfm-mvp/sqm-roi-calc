@@ -7,9 +7,8 @@ import requests
 import streamlit as st
 import plotly.express as px
 
-# Pad één niveau omhoog zodat we gedeelde modules kunnen importeren
+# Pad één niveau omhoog zodat we shop_mapping kunnen importeren
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
-
 from shop_mapping import SHOP_NAME_MAP
 
 st.set_page_config(page_title="Sales-per-sqm Potentieel", page_icon="📊", layout="wide")
@@ -40,7 +39,7 @@ st.title("📊 Sales-per-sqm Potentieel (CSm²I)")
 st.caption("Naamselectie via SHOP_NAME_MAP, NVO (sq_meter) via API, presets als in Storescan. URL uit Streamlit secrets.")
 
 # =========================
-# Inputs in main
+# Inputs
 # =========================
 colA, colB, colC = st.columns([1,1,1])
 with colA:
@@ -58,13 +57,13 @@ with colB:
 
 with colC:
     try:
-        API_URL = st.secrets["API_URL"]  # bv. "https://vemcount-agent.onrender.com/get-report"
+        API_URL = st.secrets["API_URL"]
     except KeyError:
         st.error("API_URL ontbreekt in Streamlit secrets. Voeg toe aan `.streamlit/secrets.toml`.")
         st.stop()
 
 # =========================
-# Naam <-> ID mapping
+# Mapping
 # =========================
 NAME_TO_ID = {v: k for k, v in SHOP_NAME_MAP.items()}
 ID_TO_NAME = {k: v for k, v in SHOP_NAME_MAP.items()}
@@ -79,7 +78,7 @@ if not shop_ids:
     st.stop()
 
 # =========================
-# API fetch (POST met [] keys)
+# API call (POST met [] keys)
 # =========================
 def fetch_report(api_full_url: str, period: str, shop_ids: list[int], metrics: list[str], step: str = "day"):
     payload = [
@@ -96,30 +95,55 @@ def fetch_report(api_full_url: str, period: str, shop_ids: list[int], metrics: l
     return r.json()
 
 # =========================
-# Parser die alle gevraagde velden pakt
+# Slimme parser
 # =========================
 def parse_vemcount(payload: dict, shop_ids: list[int], fields: list[str]) -> pd.DataFrame:
+    """
+    Werkt voor zowel platte 'data'-structuur als geneste 'dates'-structuur.
+    Aggegreert automatisch naar 1 regel per winkel.
+    """
     rows = []
-    if "data" in payload:
+
+    # CASE 1: Platte structuur
+    if "data" in payload and isinstance(payload["data"], dict):
         for sid in shop_ids:
             rec = payload["data"].get(str(sid), {}) or {}
             row = {"shop_id": sid}
             for f in fields:
                 row[f] = rec.get(f, np.nan)
             rows.append(row)
-    else:
-        for sid, content in payload.items():
-            dates = content.get("dates", {})
-            for date_label, day_info in dates.items():
-                data = day_info.get("data", {})
-                row = {"shop_id": int(sid)}
-                for f in fields:
-                    row[f] = data.get(f, np.nan)
-                rows.append(row)
-    return pd.DataFrame(rows)
+        return pd.DataFrame(rows)
+
+    # CASE 2: Geneste structuur
+    for sid, content in payload.items():
+        if not isinstance(content, dict):
+            continue
+        dates = content.get("dates", {})
+        for date_label, day_info in dates.items():
+            data = day_info.get("data", {})
+            row = {"shop_id": int(sid)}
+            for f in fields:
+                row[f] = data.get(f, np.nan)
+            rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+
+    # Aggregatie naar 1 regel per winkel
+    agg_dict = {}
+    for f in fields:
+        if f in ["count_in", "turnover"]:
+            agg_dict[f] = "sum"
+        else:
+            agg_dict[f] = "mean"
+
+    df = df.groupby("shop_id", as_index=False).agg(agg_dict)
+    return df
 
 # =========================
-# Mock data generator
+# Mock data
 # =========================
 def make_mock_dataframe(shop_ids: list[int], rng_seed=42) -> pd.DataFrame:
     rng = np.random.default_rng(rng_seed)
@@ -162,7 +186,6 @@ if st.button("Analyseer", type="primary"):
             st.info("Mock data gebruikt")
         else:
             payload = fetch_report(API_URL, period, shop_ids, metrics, step="day")
-            # Debug-output API
             with st.expander("🔍 API Response Debug"):
                 st.json(payload)
             df = parse_vemcount(payload, shop_ids, fields=metrics)
