@@ -56,18 +56,18 @@ if not shop_ids:
     st.warning("Please select at least one store.")
     st.stop()
 
-# Benchmark-modus
+# Benchmark-modus (voor doel-CSm²I, niet voor conversie)
 use_benchmark = st.toggle("📌 Gebruik benchmark-winkel i.p.v. vaste CSm²I-target", value=False)
 benchmark_store_id, benchmark_store_name = None, None
 if use_benchmark:
     benchmark_store_name = st.selectbox("Kies benchmark-winkel", options=selected_names)
     benchmark_store_id = NAME_TO_ID[benchmark_store_name]
 else:
-    # Alleen zichtbaar als benchmark UIT staat
+    # Slider voor doel-CSm²I als benchmark UIT staat
     target_csm2i = st.slider("Target CSm²I", min_value=0.10, max_value=1.00, value=0.85, step=0.05)
 
-# Conversie‑optie
-include_conversion = st.toggle("🎯 Toon ook conversie‑potentieel", value=True)
+# 🎯 Nieuw: slider voor gewenste conversie (stuurt conversie-uplift)
+target_conv_pct = st.slider("Target conversion rate (%)", min_value=10, max_value=50, value=35, step=1)
 
 STEP = "day"  # hardcoded period_step
 
@@ -185,111 +185,107 @@ if st.button("Analyseer", type="secondary"):
             target_label = f"CSm²I target {target_csm2i_eff:.2f}"
 
         # Uplift t.o.v. CSm²I-target
-        df["uplift_eur"] = np.maximum(0.0, (target_csm2i_eff * df["expected_spsqm"] - df["actual_spsqm"])) * sq
-        total_csm_uplift = float(df["uplift_eur"].sum())
+        df["uplift_eur_csm"] = np.maximum(0.0, (target_csm2i_eff * df["expected_spsqm"] - df["actual_spsqm"])) * sq
+        total_csm_uplift = float(df["uplift_eur_csm"].sum())
 
-        # === Conversie‑potentieel (optioneel tweede blok)
-        total_conv_uplift = 0.0
-        df["conv_uplift_eur"] = 0.0
-        if include_conversion:
-            # target conversie (fractie): benchmark conv% of mediaan conv% van geselecteerde winkels
-            if use_benchmark and benchmark_store_id in df["shop_id"].values:
-                conv_target_frac = float(benchmark_row["conversion_rate"].iloc[0]) / 100.0
-                conv_target_label = f"{benchmark_store_name}"
-            else:
-                conv_target_frac = float(df["conversion_rate"].median()) / 100.0
-                conv_target_label = "median of selection"
+        # 🎯 Conversie‑uplift met slider (ongeacht benchmark)
+        conv_target_frac = float(target_conv_pct) / 100.0
+        spv_current = df["sales_per_visitor"].astype(float)
+        spt = df["sales_per_transaction"].astype(float)
+        spv_target = conv_target_frac * spt
+        delta_spv = np.maximum(0.0, spv_target - spv_current)
+        df["uplift_eur_conv"] = delta_spv * df["count_in"].astype(float)
+        total_conv_uplift = float(df["uplift_eur_conv"].sum())
 
-            # SPV_target = conv_target × SPT; extra omzet = (SPV_target − SPV_current) × count_in
-            spv_current = df["sales_per_visitor"].astype(float)
-            spt = df["sales_per_transaction"].astype(float)
-            spv_target = conv_target_frac * spt
-            delta_spv = np.maximum(0.0, spv_target - spv_current)
-            df["conv_uplift_eur"] = delta_spv * df["count_in"].astype(float)
-            total_conv_uplift = float(df["conv_uplift_eur"].sum())
+        # Totaal
+        df["uplift_total"] = df["uplift_eur_csm"] + df["uplift_eur_conv"]
+        total_all = float(df["uplift_total"].sum())
 
         # === KPI‑BANNERS ===
         st.markdown(f"""
-            <div style='background-color: #FEAC76; color: #000000;
-                        padding: 1.0rem; border-radius: 0.75rem;
-                        font-size: 1.02rem; font-weight: 600;
-                        text-align: center; margin-bottom: 0.75rem;'>
-                🚀 CSm²I potential <span style='opacity:.75'>(over <b>{period}</b>, target {target_label})</span><br/>
-                <span style='font-size:1.4rem;'>{_eur(total_csm_uplift, 0)}</span>
+            <div style='display:flex; gap:12px; flex-wrap:wrap;'>
+              <div style='flex:1; min-width:260px; background:#FEAC76; color:#000; padding:1rem; border-radius:12px; text-align:center; font-weight:600;'>
+                🚀 CSm²I potential <div style='opacity:.75'>({period}, target {target_label})</div>
+                <div style='font-size:1.3rem; margin-top:.25rem;'>{_eur(total_csm_uplift, 0)}</div>
+              </div>
+              <div style='flex:1; min-width:260px; background:#FEAC76; color:#000; padding:1rem; border-radius:12px; text-align:center; font-weight:600;'>
+                🎯 Conversion potential <div style='opacity:.75'>({period}, target conv = {target_conv_pct}%)</div>
+                <div style='font-size:1.3rem; margin-top:.25rem;'>{_eur(total_conv_uplift, 0)}</div>
+              </div>
+              <div style='flex:1; min-width:260px; background:#FEAC76; color:#000; padding:1rem; border-radius:12px; text-align:center; font-weight:700;'>
+                Σ Total potential <div style='opacity:.75'>({period})</div>
+                <div style='font-size:1.35rem; margin-top:.25rem;'>{_eur(total_all, 0)}</div>
+              </div>
             </div>
         """, unsafe_allow_html=True)
 
-        if include_conversion:
-            st.markdown(f"""
-                <div style='background-color: #FEAC76; color: #000000;
-                            padding: 1.0rem; border-radius: 0.75rem;
-                            font-size: 1.02rem; font-weight: 600;
-                            text-align: center; margin-bottom: 1.0rem;'>
-                    🎯 Conversion potential <span style='opacity:.75'>(over <b>{period}</b>, target conv = {conv_target_label})</span><br/>
-                    <span style='font-size:1.4rem;'>{_eur(total_conv_uplift, 0)}</span>
-                </div>
-            """, unsafe_allow_html=True)
-
         # === TABEL (opgeschoond + EU formats) ===
-        table_cols = {
+        table = pd.DataFrame({
             "Store": df["Store"],
             "Square meters": sq.round(0).astype("Int64"),
             "Current Avg Sales per sqm": df["actual_spsqm"].round(2).map(lambda v: _eur(v, 2)),
             "CSm²I (index)": df["CSm2I"].round(2),
-            "Potential revenue uplift (€)": df["uplift_eur"].round(0).map(lambda v: _eur(v, 0)),
-        }
-        if include_conversion:
-            table_cols["Conversion potential (€)"] = df["conv_uplift_eur"].round(0).map(lambda v: _eur(v, 0))
-
-        table = pd.DataFrame(table_cols).sort_values("Potential revenue uplift (€)", ascending=False)
+            "Uplift from CSm²I (€)": df["uplift_eur_csm"].round(0).map(lambda v: _eur(v, 0)),
+            "Uplift from Conversion (€)": df["uplift_eur_conv"].round(0).map(lambda v: _eur(v, 0)),
+            "Total Potential Uplift (€)": df["uplift_total"].round(0).map(lambda v: _eur(v, 0)),
+        }).sort_values("Total Potential Uplift (€)", ascending=False)
         st.subheader("🏆 Stores with most potential")
         st.dataframe(table, use_container_width=True)
 
         # === BAR CHART (CSm²I uplift, kleur #762181) ===
-        chart_df = df[["Store","uplift_eur","CSm2I"]].copy()
-        chart_df["uplift_fmt"] = chart_df["uplift_eur"].map(lambda v: _eur(v, 0))
+        chart_df = df[["Store","uplift_eur_csm","CSm2I"]].copy()
+        chart_df["uplift_fmt"] = chart_df["uplift_eur_csm"].map(lambda v: _eur(v, 0))
         fig = px.bar(
-            chart_df.sort_values("uplift_eur", ascending=False).head(20),
-            x="Store", y="uplift_eur",
+            chart_df.sort_values("uplift_eur_csm", ascending=False).head(20),
+            x="Store", y="uplift_eur_csm",
             custom_data=["uplift_fmt","CSm2I"],
             color_discrete_sequence=["#762181"]
         )
-        fig.update_traces(hovertemplate="<b>%{x}</b><br>Uplift: %{customdata[0]}<br>CSm²I: %{customdata[1]:.2f}<extra></extra>")
+        fig.update_traces(hovertemplate="<b>%{x}</b><br>CSm²I uplift: %{customdata[0]}<br>CSm²I: %{customdata[1]:.2f}<extra></extra>")
         fig.update_layout(margin=dict(l=10,r=10,t=30,b=60),
-                          yaxis_title="Potential revenue uplift (€)")
+                          yaxis_title="CSm²I potential (€)")
         st.plotly_chart(fig, use_container_width=True)
 
         # === Extra bar chart (Conversion potential) ===
-        if include_conversion:
-            conv_chart = df[["Store","conv_uplift_eur"]].copy()
-            conv_chart["uplift_fmt"] = conv_chart["conv_uplift_eur"].map(lambda v: _eur(v, 0))
-            figc = px.bar(
-                conv_chart.sort_values("conv_uplift_eur", descending=True).head(20),
-                x="Store", y="conv_uplift_eur",
-                custom_data=["uplift_fmt"],
-                color_discrete_sequence=["#9E77ED"]
-            )
-            figc.update_traces(hovertemplate="<b>%{x}</b><br>Conv uplift: %{customdata[0]}<extra></extra>")
-            figc.update_layout(margin=dict(l=10,r=10,t=30,b=60),
-                               yaxis_title="Conversion potential (€)")
-            st.plotly_chart(figc, use_container_width=True)
+        conv_chart = df[["Store","uplift_eur_conv"]].copy()
+        conv_chart["uplift_fmt"] = conv_chart["uplift_eur_conv"].map(lambda v: _eur(v, 0))
+        figc = px.bar(
+            conv_chart.sort_values("uplift_eur_conv", ascending=False).head(20),
+            x="Store", y="uplift_eur_conv",
+            custom_data=["uplift_fmt"],
+            color_discrete_sequence=["#9E77ED"]
+        )
+        figc.update_traces(hovertemplate="<b>%{x}</b><br>Conversion uplift: %{customdata[0]}<extra></extra>")
+        figc.update_layout(margin=dict(l=10,r=10,t=30,b=60),
+                           yaxis_title="Conversion potential (€)")
+        st.plotly_chart(figc, use_container_width=True)
 
-        # === SCATTER (Viridis + slimme x/y-as schaal) ===
-        sc = df[["Store","sales_per_visitor","visitors_per_sqm","CSm2I","uplift_eur"]].copy()
-        sc["uplift_fmt"] = sc["uplift_eur"].map(lambda v: _eur(v, 0))
+        # === SCATTER (Viridis op CSm²I + symbolen voor driver) ===
+        sc = df[["Store","sales_per_visitor","visitors_per_sqm","CSm2I","uplift_eur_csm","uplift_eur_conv","uplift_total"]].copy()
+        # Bepaal dominante driver
+        def driver(row):
+            if row["uplift_eur_csm"] > row["uplift_eur_conv"] * 1.1:  # 10% marge
+                return "CSm²I-led"
+            elif row["uplift_eur_conv"] > row["uplift_eur_csm"] * 1.1:
+                return "Conversion-led"
+            else:
+                return "Mixed"
+        sc["Driver"] = sc.apply(driver, axis=1)
         x_rng = smart_range(sc["sales_per_visitor"])
         y_rng = smart_range(sc["visitors_per_sqm"])
 
         fig2 = px.scatter(
             sc, x="sales_per_visitor", y="visitors_per_sqm",
-            size="uplift_eur", color="CSm2I", color_continuous_scale="Viridis",
-            hover_data={"Store": True, "sales_per_visitor": ":.2f", "visitors_per_sqm": ":.2f"},
-            custom_data=["Store","uplift_fmt","CSm2I"]
+            size="uplift_total", color="CSm2I", color_continuous_scale="Viridis",
+            symbol="Driver", symbol_sequence=["circle","diamond","triangle-up"],
+            hover_data={"Store": True, "sales_per_visitor": ":.2f", "visitors_per_sqm": ":.2f", "Driver": True},
+            custom_data=["Store","uplift_total","CSm2I","Driver"]
         )
         fig2.update_traces(
             hovertemplate="<b>%{customdata[0]}</b><br>"
-                          "Uplift: %{customdata[1]}<br>"
+                          "Total uplift: %{customdata[1]:,.0f}<br>"
                           "CSm²I: %{customdata[2]:.2f}<br>"
+                          "Driver: %{customdata[3]}<br>"
                           "SPV: %{x:.2f}<br>"
                           "Visitors/m²: %{y:.2f}<extra></extra>"
         )
@@ -308,6 +304,7 @@ if st.button("Analyseer", type="secondary"):
             **Toelichting**  
             - **CSm²I (index)** = *actual sales per m²* ÷ *expected sales per m²*. Verwacht = *(sales per visitor) × (visitors per m²)*.  
             - **CSm²I potential (€)** = *(target_CSm²I × expected − actual) × m²*: extra omzet in **{period}** als de winkel naar het target groeit.  
-            - **Conversion potential (€)** (indien aangezet) = *(target_conv × SPT − SPV) × bezoekers*: extra omzet in **{period}** bij verhogen van conversie.  
+            - **Conversion potential (€)** = *(target_conv% × SPT − SPV) × bezoekers*: extra omzet in **{period}** bij verhogen van conversie naar {target_conv_pct}%.  
+            - **Total** = som van beide componenten; geen dubbelcounting (CSm²I‑ en conversie‑uplift worden apart berekend).  
             """
         )
