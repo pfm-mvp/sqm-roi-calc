@@ -159,8 +159,12 @@ if st.button("Analyseer", type="primary"):
 
         if mock_mode:
             df = make_mock_dataframe(shop_ids)
+            st.info("Mock data gebruikt")
         else:
             payload = fetch_report(API_URL, period, shop_ids, metrics, step="day")
+            # Debug-output API
+            with st.expander("🔍 API Response Debug"):
+                st.json(payload)
             df = parse_vemcount(payload, shop_ids, fields=metrics)
 
         if df.empty:
