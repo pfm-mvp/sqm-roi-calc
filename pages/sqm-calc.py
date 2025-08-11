@@ -1,4 +1,4 @@
-# pages/sqm-calc.py
+    # pages/sqm-calc.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -292,49 +292,112 @@ if run:
     st.dataframe(tab, use_container_width=True)
 
     # ===== Visuals =====
-    # Bar: CSm²I potential per store
+    # ===== Bar: CSm²I potential per store (nette €-hover) =====
+    agg["uplift_csm_eur"]  = agg["uplift_csm"].round(0).map(fmt_eur)
     bar_csm = px.bar(
         agg.sort_values("uplift_csm", ascending=False),
-        x="shop_name", y="uplift_csm",
-        labels={"shop_name":"Store","uplift_csm":"CSm²I potential (€)"},
+        x="shop_name",
+        y="uplift_csm",
+        labels={"shop_name": "Store", "uplift_csm": "CSm²I potential (€)"},
+        custom_data=["uplift_csm_eur"],
     )
-    bar_csm.update_traces(marker_color="#7C3AED")
-    bar_csm.update_layout(margin=dict(l=20,r=20,t=20,b=20), height=420)
+    bar_csm.update_traces(
+        marker_color="#7C3AED",
+        hovertemplate="<b>%{x}</b><br>CSm²I potential: %{customdata[0]}<extra></extra>",
+    )
+    bar_csm.update_layout(
+        margin=dict(l=20, r=20, t=20, b=20),
+        height=420,
+        yaxis=dict(title="CSm²I potential (€)", tickformat=",.0f"),  # as number; hover is €-string
+    )
     st.plotly_chart(bar_csm, use_container_width=True)
 
-    # Bar: Conversion potential per store
+    # ===== Bar: Conversion potential per store (nette €-hover) =====
+    agg["uplift_conv_eur"] = agg["uplift_conv"].round(0).map(fmt_eur)
     bar_conv = px.bar(
         agg.sort_values("uplift_conv", ascending=False),
-        x="shop_name", y="uplift_conv",
-        labels={"shop_name":"Store","uplift_conv":"Conversion potential (€)"},
+        x="shop_name",
+        y="uplift_conv",
+        labels={"shop_name": "Store", "uplift_conv": "Conversion potential (€)"},
+        custom_data=["uplift_conv_eur"],
     )
-    bar_conv.update_traces(marker_color="#A78BFA")
-    bar_conv.update_layout(margin=dict(l=20,r=20,t=20,b=20), height=380)
+    bar_conv.update_traces(
+        marker_color="#A78BFA",
+        hovertemplate="<b>%{x}</b><br>Conversion potential: %{customdata[0]}<extra></extra>",
+    )
+    bar_conv.update_layout(
+        margin=dict(l=20, r=20, t=20, b=20),
+        height=380,
+        yaxis=dict(title="Conversion potential (€)", tickformat=",.0f"),
+    )
     st.plotly_chart(bar_conv, use_container_width=True)
 
-    # Bubble scatter: driver map
+    # ===== Bubble scatter: Driver map (begrijpbare legenda & hover) =====
     driver_df = df.copy()
     driver_df["driver_csm_share"] = df["uplift_eur_csm"] / (df["uplift_eur_csm"] + df["uplift_eur_conv"] + EPS)
     driver_df["visitors_per_m2"]  = df["count_in"] / (df["sq_meter"] + EPS)
-    driver_df["driver"] = np.select(
+
+    # NL labels
+    driver_df["driver_raw"] = np.select(
         [driver_df["driver_csm_share"] >= 0.65, driver_df["driver_csm_share"] <= 0.35],
-        ["CSm²I-led","Conversion-led"], default="Mixed"
+        ["CSm²I-gedreven", "Conversie-gedreven"],
+        default="Gemengd",
     )
 
+    summary = driver_df.groupby(["shop_id", "shop_name"]).agg(
+        spv=("actual_spv", "mean"),
+        vpm2=("visitors_per_m2", "mean"),
+        visitors=("count_in", "sum"),
+        csi=("csm2i", "mean"),
+        driver=("driver_raw", lambda s: s.value_counts().idxmax()),
+    ).reset_index()
+
+    # Hover strings (SPV/CSm²I netjes)
+    summary["spv_fmt"] = summary["spv"].round(2).apply(lambda v: ("€{:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X", "."))
+    summary["csi_fmt"] = summary["csi"].round(2).astype(str).str.replace(".", ",")
+    summary["vis_fmt"] = summary["visitors"].round(0).map(lambda v: "{:,.0f}".format(v).replace(",", "."))  # duizendtallen met punt
+
+    color_map = {
+        "CSm²I-gedreven": "#7C3AED",   # paars
+        "Conversie-gedreven": "#F04438",  # PFM rood
+        "Gemengd": "#64748B",          # neutraal (slate)
+    }
+    symbol_map = {
+        "CSm²I-gedreven": "circle",
+        "Conversie-gedreven": "diamond",
+        "Gemengd": "square",
+    }
+
     bubble = px.scatter(
-        driver_df.groupby(["shop_id","shop_name"]).agg(
-            spv=("actual_spv","mean"),
-            vpm2=("visitors_per_m2","mean"),
-            visitors=("count_in","sum"),
-            csi=("csm2i","mean"),
-            driver=("driver", lambda s: s.value_counts().idxmax())
-        ).reset_index(),
-        x="spv", y="vpm2", size="visitors", color="driver",
-        hover_data={"shop_name":True,"csi":":.2f","spv":":.2f","vpm2":":.0f"},
-        labels={"spv":"Sales per Visitor","vpm2":"Visitors per m²"},
+        summary,
+        x="spv",
+        y="vpm2",
+        size="visitors",
+        color="driver",
+        symbol="driver",
+        color_discrete_map=color_map,
+        symbol_map=symbol_map,
+        hover_data={"shop_name": True, "spv": False, "vpm2": False, "csi": False, "visitors": False, "spv_fmt": True, "csi_fmt": True, "vis_fmt": True},
+        labels={"spv": "Sales per Visitor", "vpm2": "Visitors per m²", "driver": "Driver"},
     )
-    bubble.update_layout(margin=dict(l=20,r=20,t=10,b=10), height=520)
+
+    bubble.update_traces(
+        hovertemplate="<b>%{customdata[0]}</b><br>"
+                      "SPV: %{customdata[5]}<br>"
+                      "CSm²I: %{customdata[6]}<br>"
+                      "Bezoekers: %{customdata[7]}<extra></extra>"
+    )
+
+    # As‑titels & leesbaarheid
+    bubble.update_layout(
+        margin=dict(l=20, r=20, t=10, b=10),
+        height=520,
+        legend_title_text="Driver",
+        xaxis=dict(title="Sales per Visitor (€/bezoeker)", tickformat=",.2f"),
+        yaxis=dict(title="Visitors per m²", tickformat=",.0f"),
+    )
     st.plotly_chart(bubble, use_container_width=True)
+
 
     # Toelichting
     st.markdown(
