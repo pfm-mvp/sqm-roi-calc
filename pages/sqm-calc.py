@@ -1,4 +1,4 @@
-    # pages/sqm-calc.py
+# pages/sqm-calc.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -32,7 +32,7 @@ button[data-testid="stBaseButton-secondary"]:hover { background-color: #d13c30 !
 st.title("Sales‑per‑sqm Potentieel (CSm²I)")
 
 # =========================
-# Helpers (gedeelde kern)
+# Helpers
 # =========================
 EPS = 1e-9
 DEFAULT_SQ_METER = 1.0
@@ -49,18 +49,14 @@ def coerce_numeric(df, cols):
 
 def normalize_kpis(df: pd.DataFrame) -> pd.DataFrame:
     out = coerce_numeric(df, ["turnover","transactions","count_in","sales_per_visitor","conversion_rate","sq_meter"])
-    # conversie naar fractie
     if "conversion_rate" in out.columns and not out["conversion_rate"].empty:
         if out["conversion_rate"].max() > 1.5:
             out["conversion_rate"] = out["conversion_rate"] / 100.0
     else:
         out["conversion_rate"] = out.get("transactions", 0.0) / (out.get("count_in", 0.0) + EPS)
-    # SPV
     if ("sales_per_visitor" not in out.columns) or out["sales_per_visitor"].isna().all():
         out["sales_per_visitor"] = out.get("turnover", 0.0) / (out.get("count_in", 0.0) + EPS)
-    # ATV
     out["atv"] = out.get("turnover", 0.0) / (out.get("transactions", 0.0) + EPS)
-    # m² fallback
     if "sq_meter" in out.columns:
         sqm = pd.to_numeric(out["sq_meter"], errors="coerce")
         med = sqm.replace(0, np.nan).median()
@@ -71,10 +67,6 @@ def normalize_kpis(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 def choose_ref_spv(df: pd.DataFrame, mode="portfolio", benchmark_shop_id=None, manual_spv=None, uplift_pct=0.0):
-    """
-    Bepaalt referentie‑SPV (€/bezoeker): portfolio | benchmark | manual, incl. optionele uplift_pct.
-    Robuust tegen niet‑numerieke data.
-    """
     safe = df.copy()
     for c in ["turnover","count_in","shop_id"]:
         if c in safe.columns:
@@ -99,13 +91,6 @@ def choose_ref_spv(df: pd.DataFrame, mode="portfolio", benchmark_shop_id=None, m
     return base * (1.0 + float(uplift_pct))
 
 def compute_csm2i_and_uplift(df: pd.DataFrame, ref_spv: float, csm2i_target: float):
-    """
-    Canonisch:
-      actual_spv = turnover / visitors
-      CSm²I = actual_spv / ref_spv
-      expected_spsqm = ref_spv * visitors_per_sqm
-      uplift_eur_csm = max(0, visitors * (csm2i_target*ref_spv - actual_spv))
-    """
     out = normalize_kpis(df)
     out["visitors"]   = out["count_in"]
     out["actual_spv"] = out["turnover"] / (out["visitors"] + EPS)
@@ -198,7 +183,6 @@ if run:
         if df.empty:
             st.info("Geen data beschikbaar voor de gekozen periode."); st.stop()
 
-    # Referentie‑SPV (keuze 1B: benchmark als aan, anders portfolio)
     mode = "benchmark" if st.session_state.get("use_bm", False) else "portfolio"
     bm_id = NAME_TO_ID.get(bm_name) if (mode == "benchmark" and bm_name) else None
     ref_spv = choose_ref_spv(df, mode=mode, benchmark_shop_id=bm_id, uplift_pct=0.0)
@@ -206,14 +190,11 @@ if run:
     # Uniforme CSm²I + uplift
     df = compute_csm2i_and_uplift(df, ref_spv=ref_spv, csm2i_target=csm2i_target)
 
-    # ========== Conversie‑uplift ==========
+    # Conversie‑uplift
     conv_target = float(conv_target_pct) / 100.0
-    df["uplift_eur_conv"] = np.maximum(
-        0.0,
-        (conv_target - df["conversion_rate"]) * df["count_in"]
-    ) * df["atv"]
+    df["uplift_eur_conv"] = np.maximum(0.0, (conv_target - df["conversion_rate"]) * df["count_in"]) * df["atv"]
 
-    # ========== Aggregatie ==========
+    # ========== Aggregatie voor tegels/tabel ==========
     agg = df.groupby(["shop_id","shop_name"]).agg(
         visitors=("count_in","sum"),
         turnover=("turnover","sum"),
@@ -224,6 +205,15 @@ if run:
         uplift_conv=("uplift_eur_conv","sum"),
     ).reset_index()
     agg["uplift_total"] = agg["uplift_csm"] + agg["uplift_conv"]
+
+    # --- SPV benchmark t.o.v. beste winkel ---
+    spv_by_shop = df.groupby(["shop_id", "shop_name"])["actual_spv"].mean().reset_index()
+    best_row = spv_by_shop.loc[spv_by_shop["actual_spv"].idxmax()]
+    best_shop_name = str(best_row["shop_name"])
+    best_spv = float(best_row["actual_spv"])
+    agg = agg.merge(spv_by_shop.rename(columns={"actual_spv": "spv_current"}), on=["shop_id", "shop_name"], how="left")
+    agg["uplift_vs_best"] = np.maximum(0.0, (best_spv - agg["spv_current"])) * agg["visitors"]
+    total_uplift_vs_best = float(agg["uplift_vs_best"].sum())
 
     # ===== KPI‑tegels =====
     c1, c2, c3 = st.columns(3)
@@ -242,8 +232,17 @@ if run:
             <div class="kpi eur">{fmt_eur(agg["uplift_total"].sum())}</div></div>""",
         unsafe_allow_html=True
     )
+    # Extra SPV‑tegel
+    st.markdown(
+        f"""<div class="card" style="margin-top:10px;">
+              <div>📈 <b>SPV vs Topwinkel</b><br/>
+              <small>Beste: {best_shop_name} (SPV {("€{:,.2f}".format(best_spv)).replace(",", "X").replace(".", ",").replace("X",".")})</small></div>
+              <div class="kpi eur">{fmt_eur(total_uplift_vs_best)}</div>
+            </div>""",
+        unsafe_allow_html=True
+    )
 
-    # ===== kleine spacer tussen KPI‑rij en widget =====
+    # ===== kleine spacer =====
     st.markdown("<div style='height: 12px'></div>", unsafe_allow_html=True)
 
     # ===== PFM‑oranje total widget =====
@@ -265,138 +264,119 @@ if run:
 
     # ===== Tabel =====
     st.markdown("### 🏆 Stores with most potential")
-
-    # Sorteer eerst op uplift_total (bronkolom), daarna hernoemen + formatteren
     tab_src = agg[[
-        "shop_name","sqm","spsqm","csm2i","uplift_csm","uplift_conv","uplift_total"
+        "shop_name","sqm","spsqm","csm2i","uplift_csm","uplift_conv","uplift_total","spv_current","uplift_vs_best"
     ]].sort_values("uplift_total", ascending=False)
 
-    tab = tab_src.rename(columns={
+    table = tab_src.rename(columns={
         "shop_name": "Store",
         "sqm": "Square meters",
         "spsqm": "Current Avg Sales per sqm",
         "csm2i": "CSm²I (index)",
         "uplift_csm": "Uplift from CSm²I (€)",
         "uplift_conv": "Uplift from Conversion (€)",
-        "uplift_total": "Total Potential Uplift (€)"
+        "uplift_total": "Total Potential Uplift (€)",
+        "spv_current": "SPV (gem)",
+        "uplift_vs_best": "Uplift vs top‑SPV (€)"
     }).copy()
-
-    for col in ["Uplift from CSm²I (€)", "Uplift from Conversion (€)", "Total Potential Uplift (€)"]:
-        tab[col] = tab[col].round(0).apply(fmt_eur)
-
-    tab["Current Avg Sales per sqm"] = tab["Current Avg Sales per sqm"].round(2).apply(
+    for col in ["Uplift from CSm²I (€)", "Uplift from Conversion (€)", "Total Potential Uplift (€)", "Uplift vs top‑SPV (€)"]:
+        table[col] = table[col].round(0).apply(fmt_eur)
+    table["Current Avg Sales per sqm"] = table["Current Avg Sales per sqm"].round(2).apply(
         lambda v: ("€{:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X",".")
     )
-    tab["CSm²I (index)"] = tab["CSm²I (index)"].round(2)
-
-    st.dataframe(tab, use_container_width=True)
+    table["CSm²I (index)"] = table["CSm²I (index)"].round(2)
+    table["SPV (gem)"] = table["SPV (gem)"].round(2).apply(
+        lambda v: ("€{:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X",".")
+    )
+    st.dataframe(table, use_container_width=True)
 
     # ===== Visuals =====
-    # ===== Bar: CSm²I potential per store (nette €-hover) =====
     agg["uplift_csm_eur"]  = agg["uplift_csm"].round(0).map(fmt_eur)
     bar_csm = px.bar(
         agg.sort_values("uplift_csm", ascending=False),
-        x="shop_name",
-        y="uplift_csm",
-        labels={"shop_name": "Store", "uplift_csm": "CSm²I potential (€)"},
+        x="shop_name", y="uplift_csm",
+        labels={"shop_name":"Store","uplift_csm":"CSm²I potential (€)"},
         custom_data=["uplift_csm_eur"],
     )
     bar_csm.update_traces(
         marker_color="#7C3AED",
         hovertemplate="<b>%{x}</b><br>CSm²I potential: %{customdata[0]}<extra></extra>",
     )
-    bar_csm.update_layout(
-        margin=dict(l=20, r=20, t=20, b=20),
-        height=420,
-        yaxis=dict(title="CSm²I potential (€)", tickformat=",.0f"),  # as number; hover is €-string
-    )
+    bar_csm.update_layout(margin=dict(l=20,r=20,t=20,b=20), height=420, yaxis=dict(title="CSm²I potential (€)", tickformat=",.0f"))
     st.plotly_chart(bar_csm, use_container_width=True)
 
-    # ===== Bar: Conversion potential per store (nette €-hover) =====
     agg["uplift_conv_eur"] = agg["uplift_conv"].round(0).map(fmt_eur)
     bar_conv = px.bar(
         agg.sort_values("uplift_conv", ascending=False),
-        x="shop_name",
-        y="uplift_conv",
-        labels={"shop_name": "Store", "uplift_conv": "Conversion potential (€)"},
+        x="shop_name", y="uplift_conv",
+        labels={"shop_name":"Store","uplift_conv":"Conversion potential (€)"},
         custom_data=["uplift_conv_eur"],
     )
     bar_conv.update_traces(
         marker_color="#A78BFA",
         hovertemplate="<b>%{x}</b><br>Conversion potential: %{customdata[0]}<extra></extra>",
     )
-    bar_conv.update_layout(
-        margin=dict(l=20, r=20, t=20, b=20),
-        height=380,
-        yaxis=dict(title="Conversion potential (€)", tickformat=",.0f"),
-    )
+    bar_conv.update_layout(margin=dict(l=20,r=20,t=20,b=20), height=380, yaxis=dict(title="Conversion potential (€)", tickformat=",.0f"))
     st.plotly_chart(bar_conv, use_container_width=True)
 
-    # ===== Scatter: SPV vs Sales per m² (duidelijk, met CSm²I vs target) =====
-    # per winkel samenvatten
-    scat = df.groupby(["shop_id", "shop_name"]).agg(
-        spv=("actual_spv", "mean"),                # Sales per Visitor (€/bezoeker)
-        spsqm=("actual_spsqm", "mean"),            # Sales per m² (€/m²)
-        csi=("csm2i", "mean"),                     # CSm²I
+    # ===== Scatter (laatste visual): SPV vs Sales per m² =====
+    rad = df.groupby(["shop_id", "shop_name"]).agg(
+        spv=("actual_spv", "mean"),
+        spsqm=("actual_spsqm", "mean"),
+        csi=("csm2i", "mean"),
         visitors=("count_in", "sum"),
     ).reset_index()
 
-    # grootte van de bubbel: liefst totale uplift als die al is berekend, anders visitors
-    size_series = None
     if "uplift_total" in agg.columns:
         size_series = agg.set_index("shop_id")["uplift_total"]
-        scat["size_metric"] = scat["shop_id"].map(size_series).fillna(0.0)
+        rad["size_metric"] = rad["shop_id"].map(size_series).fillna(0.0)
+        size_label = "Uplift"
+        rad["hover_size"] = rad["size_metric"].round(0).map(
+            lambda v: ("€{:,.0f}".format(v)).replace(",", "X").replace(".", ",").replace("X", ".")
+        )
     else:
-        scat["size_metric"] = scat["visitors"].fillna(0.0)
+        rad["size_metric"] = rad["visitors"].fillna(0.0)
+        size_label = "Bezoekers"
+        rad["hover_size"] = rad["size_metric"].round(0).map(
+            lambda v: "{:,.0f}".format(v).replace(",", ".")
+        )
 
-    # kleurcategorie t.o.v. target (band van ±5%)
     low_thr  = float(csm2i_target) * 0.95
     high_thr = float(csm2i_target) * 1.05
-    scat["csm2i_band"] = np.select(
-        [scat["csi"] < low_thr, scat["csi"] > high_thr],
+    rad["csm2i_band"] = np.select(
+        [rad["csi"] < low_thr, rad["csi"] > high_thr],
         ["Onder target", "Boven target"],
         default="Rond target",
     )
 
-    # nette strings voor hover
-    scat["spv_fmt"]    = scat["spv"].round(2).apply(lambda v: ("€{:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X", "."))
-    scat["spsqm_fmt"]  = scat["spsqm"].round(2).apply(lambda v: ("€{:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X", "."))
-    scat["csi_fmt"]    = scat["csi"].round(2).astype(str).str.replace(".", ",")
-    scat["size_fmt"]   = scat["size_metric"].round(0).map(lambda v: ("€{:,.0f}".format(v)).replace(",", "X").replace(".", ",").replace("X", ".")) \
-                        if "uplift_total" in agg.columns else \
-                        scat["size_metric"].round(0).map(lambda v: "{:,.0f}".format(v).replace(",", "."))
+    rad["hover_spv"]   = rad["spv"].round(2).apply(lambda v: ("€{:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X", "."))
+    rad["hover_spsqm"] = rad["spsqm"].round(2).apply(lambda v: ("€{:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X", "."))
+    rad["hover_csi"]   = rad["csi"].round(2).map(lambda v: str(v).replace(".", ","))
 
-    color_map = {"Onder target": "#F04438", "Rond target": "#F59E0B", "Boven target": "#16A34A"}
-    symbol_map = {"Onder target": "diamond", "Rond target": "circle", "Boven target": "square"}
+    color_map = {"CSm²I-gedreven": "#7C3AED","Conversie-gedreven": "#F04438","Gemengd": "#64748B"}  # (niet gebruikt hier)
+    color_map2  = {"Onder target": "#F04438", "Rond target": "#F59E0B", "Boven target": "#16A34A"}
+    symbol_map2 = {"Onder target": "diamond", "Rond target": "circle", "Boven target": "square"}
 
     scatter = px.scatter(
-        scat,
-        x="spv",
-        y="spsqm",
-        size="size_metric",
-        color="csm2i_band",
-        symbol="csm2i_band",
-        color_discrete_map=color_map,
-        symbol_map=symbol_map,
-        hover_data={
-            "shop_name": True, "spv": False, "spsqm": False, "csi": False, "size_metric": False,
-            "spv_fmt": True, "spsqm_fmt": True, "csi_fmt": True, "size_fmt": True,
-        },
+        rad,
+        x="spv", y="spsqm", size="size_metric",
+        color="csm2i_band", symbol="csm2i_band",
+        color_discrete_map=color_map2, symbol_map=symbol_map2,
+        hover_data=None,
+        custom_data=rad[["hover_spv","hover_spsqm","hover_csi","hover_size"]],
         labels={"spv": "Sales per Visitor", "spsqm": "Sales per m²", "csm2i_band": "CSm²I t.o.v. target"},
     )
-
-    hover_title = "Uplift" if "uplift_total" in agg.columns else "Bezoekers"
     scatter.update_traces(
-        hovertemplate="<b>%{customdata[0]}</b><br>" +
-                      "SPV: %{customdata[5]}<br>" +
-                      "Sales per m²: %{customdata[6]}<br>" +
-                      "CSm²I: %{customdata[7]}<br>" +
-                      f"{hover_title}: " + "%{customdata[8]}<extra></extra>"
+        hovertemplate="<b>%{text}</b><br>" +
+                      "SPV: %{customdata[0]}<br>" +
+                      "Sales per m²: %{customdata[1]}<br>" +
+                      "CSm²I: %{customdata[2]}<br>" +
+                      "Uplift/Bezoekers: %{customdata[3]}<extra></extra>",
+        text=rad["shop_name"],
     )
-
     scatter.update_layout(
         margin=dict(l=20, r=20, t=10, b=10),
-        height=560,
+        height=520,
         legend_title_text="CSm²I t.o.v. target",
         xaxis=dict(title="Sales per Visitor (€/bezoeker)", tickformat=",.2f"),
         yaxis=dict(title="Sales per m² (€/m²)", tickformat=",.2f"),
