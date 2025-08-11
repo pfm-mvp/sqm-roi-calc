@@ -23,13 +23,28 @@ button[data-testid="stBaseButton-secondary"]:hover { background-color: #d13c30 !
 .kpi  { font-size: 1.2rem; font-weight: 700; }
 .eur  { font-variant-numeric: tabular-nums; }
 
-/* Oranje total widget */
-.total-widget { background:#FFE8D2; border:1px solid #FFD2A8; border-radius:14px; padding:14px 16px; }
-.total-widget h3 { margin:0 0 6px 0; font-size:1.05rem; }
-.total-widget .val { font-size:1.6rem; font-weight:800; }
-.total-widget small { color:#7A4E2D; }
-</style>
-""", unsafe_allow_html=True)
+# kleine spacer tussen KPI-rij en widget
+st.markdown("<div style='height: 12px'></div>", unsafe_allow_html=True)
+
+# ===== Oranje total widget (PFM #FEAC76) =====
+st.markdown(
+    f"""
+    <div style="
+        background:#FEAC76;
+        border:1px solid #E38F59;
+        border-radius:14px;
+        padding:16px 18px;
+        color:#2B1B10;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+        <span style="font-size:20px;">💰</span>
+        <h3 style="margin:0;font-size:1.05rem;">Total extra potential in revenue</h3>
+      </div>
+      <div style="font-size:1.6rem;font-weight:800;">{fmt_eur(agg["uplift_total"].sum())}</div>
+      <div style="margin-top:4px;"><small>Som van CSm²I‑ en conversie‑potentieel voor de geselecteerde periode.</small></div>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
 
 st.title("Sales‑per‑sqm Potentieel (CSm²I)")
 
@@ -258,24 +273,31 @@ if run:
 
     # ===== Tabel =====
     st.markdown("### 🏆 Stores with most potential")
-    tab = agg[[
-        "shop_name","sqm","spsqm","csm2i","uplift_csm","uplift_conv","uplift_total"
-    ]].rename(columns={
-        "shop_name":"Store",
-        "sqm":"Square meters",
-        "spsqm":"Current Avg Sales per sqm",
-        "csm2i":"CSm²I (index)",
-        "uplift_csm":"Uplift from CSm²I (€)",
-        "uplift_conv":"Uplift from Conversion (€)",
-        "uplift_total":"Total Potential Uplift (€)"
-    }).sort_values("uplift_total", ascending=False)
 
-    for col in ["Uplift from CSm²I (€)","Uplift from Conversion (€)","Total Potential Uplift (€)"]:
+    # Sorteer EERST op uplift_total, daarna pas hernoemen + formatteren
+    tab_src = agg[[
+        "shop_name","sqm","spsqm","csm2i","uplift_csm","uplift_conv","uplift_total"
+    ]].sort_values("uplift_total", ascending=False)
+
+    tab = tab_src.rename(columns={
+        "shop_name": "Store",
+        "sqm": "Square meters",
+        "spsqm": "Current Avg Sales per sqm",
+        "csm2i": "CSm²I (index)",
+        "uplift_csm": "Uplift from CSm²I (€)",
+        "uplift_conv": "Uplift from Conversion (€)",
+        "uplift_total": "Total Potential Uplift (€)"
+    }).copy()
+
+    # opmaak € en decimaal
+    for col in ["Uplift from CSm²I (€)", "Uplift from Conversion (€)", "Total Potential Uplift (€)"]:
         tab[col] = tab[col].round(0).apply(fmt_eur)
+
     tab["Current Avg Sales per sqm"] = tab["Current Avg Sales per sqm"].round(2).apply(
         lambda v: ("€{:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X",".")
     )
     tab["CSm²I (index)"] = tab["CSm²I (index)"].round(2)
+
     st.dataframe(tab, use_container_width=True)
 
     # ===== Visuals =====
