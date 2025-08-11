@@ -332,72 +332,76 @@ if run:
     )
     st.plotly_chart(bar_conv, use_container_width=True)
 
-    # ===== Bubble scatter: Driver map (begrijpbare legenda & hover) =====
-    driver_df = df.copy()
-    driver_df["driver_csm_share"] = df["uplift_eur_csm"] / (df["uplift_eur_csm"] + df["uplift_eur_conv"] + EPS)
-    driver_df["visitors_per_m2"]  = df["count_in"] / (df["sq_meter"] + EPS)
-
-    # NL labels
-    driver_df["driver_raw"] = np.select(
-        [driver_df["driver_csm_share"] >= 0.65, driver_df["driver_csm_share"] <= 0.35],
-        ["CSm²I-gedreven", "Conversie-gedreven"],
-        default="Gemengd",
-    )
-
-    summary = driver_df.groupby(["shop_id", "shop_name"]).agg(
-        spv=("actual_spv", "mean"),
-        vpm2=("visitors_per_m2", "mean"),
+    # ===== Scatter: SPV vs Sales per m² (duidelijk, met CSm²I vs target) =====
+    # per winkel samenvatten
+    scat = df.groupby(["shop_id", "shop_name"]).agg(
+        spv=("actual_spv", "mean"),                # Sales per Visitor (€/bezoeker)
+        spsqm=("actual_spsqm", "mean"),            # Sales per m² (€/m²)
+        csi=("csm2i", "mean"),                     # CSm²I
         visitors=("count_in", "sum"),
-        csi=("csm2i", "mean"),
-        driver=("driver_raw", lambda s: s.value_counts().idxmax()),
     ).reset_index()
 
-    # Hover strings (SPV/CSm²I netjes)
-    summary["spv_fmt"] = summary["spv"].round(2).apply(lambda v: ("€{:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X", "."))
-    summary["csi_fmt"] = summary["csi"].round(2).astype(str).str.replace(".", ",")
-    summary["vis_fmt"] = summary["visitors"].round(0).map(lambda v: "{:,.0f}".format(v).replace(",", "."))  # duizendtallen met punt
+    # grootte van de bubbel: liefst totale uplift als die al is berekend, anders visitors
+    size_series = None
+    if "uplift_total" in agg.columns:
+        size_series = agg.set_index("shop_id")["uplift_total"]
+        scat["size_metric"] = scat["shop_id"].map(size_series).fillna(0.0)
+    else:
+        scat["size_metric"] = scat["visitors"].fillna(0.0)
 
-    color_map = {
-        "CSm²I-gedreven": "#7C3AED",   # paars
-        "Conversie-gedreven": "#F04438",  # PFM rood
-        "Gemengd": "#64748B",          # neutraal (slate)
-    }
-    symbol_map = {
-        "CSm²I-gedreven": "circle",
-        "Conversie-gedreven": "diamond",
-        "Gemengd": "square",
-    }
+    # kleurcategorie t.o.v. target (band van ±5%)
+    low_thr  = float(csm2i_target) * 0.95
+    high_thr = float(csm2i_target) * 1.05
+    scat["csm2i_band"] = np.select(
+        [scat["csi"] < low_thr, scat["csi"] > high_thr],
+        ["Onder target", "Boven target"],
+        default="Rond target",
+    )
 
-    bubble = px.scatter(
-        summary,
+    # nette strings voor hover
+    scat["spv_fmt"]    = scat["spv"].round(2).apply(lambda v: ("€{:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X", "."))
+    scat["spsqm_fmt"]  = scat["spsqm"].round(2).apply(lambda v: ("€{:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X", "."))
+    scat["csi_fmt"]    = scat["csi"].round(2).astype(str).str.replace(".", ",")
+    scat["size_fmt"]   = scat["size_metric"].round(0).map(lambda v: ("€{:,.0f}".format(v)).replace(",", "X").replace(".", ",").replace("X", ".")) \
+                        if "uplift_total" in agg.columns else \
+                        scat["size_metric"].round(0).map(lambda v: "{:,.0f}".format(v).replace(",", "."))
+
+    color_map = {"Onder target": "#F04438", "Rond target": "#F59E0B", "Boven target": "#16A34A"}
+    symbol_map = {"Onder target": "diamond", "Rond target": "circle", "Boven target": "square"}
+
+    scatter = px.scatter(
+        scat,
         x="spv",
-        y="vpm2",
-        size="visitors",
-        color="driver",
-        symbol="driver",
+        y="spsqm",
+        size="size_metric",
+        color="csm2i_band",
+        symbol="csm2i_band",
         color_discrete_map=color_map,
         symbol_map=symbol_map,
-        hover_data={"shop_name": True, "spv": False, "vpm2": False, "csi": False, "visitors": False, "spv_fmt": True, "csi_fmt": True, "vis_fmt": True},
-        labels={"spv": "Sales per Visitor", "vpm2": "Visitors per m²", "driver": "Driver"},
+        hover_data={
+            "shop_name": True, "spv": False, "spsqm": False, "csi": False, "size_metric": False,
+            "spv_fmt": True, "spsqm_fmt": True, "csi_fmt": True, "size_fmt": True,
+        },
+        labels={"spv": "Sales per Visitor", "spsqm": "Sales per m²", "csm2i_band": "CSm²I t.o.v. target"},
     )
 
-    bubble.update_traces(
-        hovertemplate="<b>%{customdata[0]}</b><br>"
-                      "SPV: %{customdata[5]}<br>"
-                      "CSm²I: %{customdata[6]}<br>"
-                      "Bezoekers: %{customdata[7]}<extra></extra>"
+    hover_title = "Uplift" if "uplift_total" in agg.columns else "Bezoekers"
+    scatter.update_traces(
+        hovertemplate="<b>%{customdata[0]}</b><br>" +
+                      "SPV: %{customdata[5]}<br>" +
+                      "Sales per m²: %{customdata[6]}<br>" +
+                      "CSm²I: %{customdata[7]}<br>" +
+                      f"{hover_title}: " + "%{customdata[8]}<extra></extra>"
     )
 
-    # As‑titels & leesbaarheid
-    bubble.update_layout(
+    scatter.update_layout(
         margin=dict(l=20, r=20, t=10, b=10),
-        height=520,
-        legend_title_text="Driver",
+        height=560,
+        legend_title_text="CSm²I t.o.v. target",
         xaxis=dict(title="Sales per Visitor (€/bezoeker)", tickformat=",.2f"),
-        yaxis=dict(title="Visitors per m²", tickformat=",.0f"),
+        yaxis=dict(title="Sales per m² (€/m²)", tickformat=",.2f"),
     )
-    st.plotly_chart(bubble, use_container_width=True)
-
+    st.plotly_chart(scatter, use_container_width=True)
 
     # Toelichting
     st.markdown(
