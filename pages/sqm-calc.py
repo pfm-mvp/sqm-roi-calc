@@ -4,149 +4,108 @@ import pandas as pd
 import numpy as np
 import requests
 from datetime import date, timedelta
-import plotly.express as px
 
-# =========================
+# -----------------------------
 # Page & styling
-# =========================
+# -----------------------------
 st.set_page_config(page_title="Sales‑per‑sqm Potentieel (CSm²I)", page_icon="📈", layout="wide")
-st.markdown(
-    """
+st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap');
 html, body, [class*="css"] { font-family: 'Instrument Sans', sans-serif !important; }
 [data-baseweb="tag"] { background-color: #9E77ED !important; color: white !important; }
 button[data-testid="stBaseButton-secondary"] {
   background-color: #F04438 !important; color: white !important; border-radius: 16px !important;
-  font-weight: 600 !important; padding: 0.6rem 1.4rem !important; border: none !important;
+  font-weight: 600 !important; padding: .6rem 1.4rem !important; border: none !important;
 }
 button[data-testid="stBaseButton-secondary"]:hover { background-color: #d13c30 !important; cursor: pointer; }
-.card { border: 1px solid #eee; border-radius: 12px; padding: 14px 16px; background:#fff; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
-.kpi  { font-size: 1.2rem; font-weight: 700; }
+.card { border: 1px solid #eee; border-radius: 12px; padding: 14px 16px; background:#fff; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+.kpi  { font-size: 1.2rem; font-weight: 800; }
 .eur  { font-variant-numeric: tabular-nums; }
 </style>
-""",
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
-st.title("Sales‑per‑sqm Potentieel (CSm²I)")
-
-# =========================
+# -----------------------------
 # Helpers
-# =========================
+# -----------------------------
 EPS = 1e-9
-DEFAULT_SQ_METER = 1.0
 
-def fmt_eur(x: float) -> str:
-    return ("€{:,.0f}".format(float(x))).replace(",", "X").replace(".", ",").replace("X",".")
+def fmt_eur(v: float) -> str:
+    return ("€{:,.0f}".format(float(v))).replace(",", "X").replace(".", ",").replace("X",".")
 
-def coerce_numeric(df, cols):
+def resolve_period(preset: str) -> tuple[date, date]:
+    today = date.today()
+    first_of_month = today.replace(day=1)
+    last_month_last_day = first_of_month - timedelta(days=1)
+    last_month_first_day = last_month_last_day.replace(day=1)
+    p = (preset or "").lower()
+    if p in ("7 dagen", "last_7_days"):   return today - timedelta(days=7),  today - timedelta(days=1)
+    if p in ("30 dagen","last_30_days"):  return today - timedelta(days=30), today - timedelta(days=1)
+    if p in ("last_month","vorige maand"):return last_month_first_day, last_month_last_day
+    if p in ("month_to_date","mtd","deze maand"): return first_of_month, today
+    if p in ("year_to_date","ytd","dit jaar"):    return today.replace(month=1, day=1), today
+    if p in ("gisteren","yesterday"):      y=today-timedelta(days=1); return y,y
+    return today - timedelta(days=7), today - timedelta(days=1)
+
+def period_length_days(d_from: date, d_to: date) -> int:
+    return max(1, (d_to - d_from).days + 1)
+
+def remaining_year_days(today: date | None = None) -> int:
+    today = today or date.today()
+    end = date(today.year, 12, 31)
+    return max(0, (end - today).days)
+
+def coerce(df, cols):
     out = df.copy()
     for c in cols:
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0)
-    return out
-
-def normalize_kpis(df: pd.DataFrame) -> pd.DataFrame:
-    out = coerce_numeric(df, ["turnover","transactions","count_in","sales_per_visitor","conversion_rate","sq_meter"])
-    if "conversion_rate" in out.columns and not out["conversion_rate"].empty:
-        if out["conversion_rate"].max() > 1.5:
-            out["conversion_rate"] = out["conversion_rate"] / 100.0
-    else:
-        out["conversion_rate"] = out.get("transactions", 0.0) / (out.get("count_in", 0.0) + EPS)
-    if ("sales_per_visitor" not in out.columns) or out["sales_per_visitor"].isna().all():
-        out["sales_per_visitor"] = out.get("turnover", 0.0) / (out.get("count_in", 0.0) + EPS)
-    out["atv"] = out.get("turnover", 0.0) / (out.get("transactions", 0.0) + EPS)
-    if "sq_meter" in out.columns:
-        sqm = pd.to_numeric(out["sq_meter"], errors="coerce")
-        med = sqm.replace(0, np.nan).median()
-        fallback = med if pd.notnull(med) and med > 0 else DEFAULT_SQ_METER
-        out["sq_meter"] = sqm.replace(0, np.nan).fillna(fallback)
-    else:
-        out["sq_meter"] = DEFAULT_SQ_METER
-    return out
-
-def choose_ref_spv(df: pd.DataFrame, mode="portfolio", benchmark_shop_id=None, manual_spv=None, uplift_pct=0.0):
-    safe = df.copy()
-    for c in ["turnover","count_in","shop_id"]:
-        if c in safe.columns:
-            safe[c] = pd.to_numeric(safe[c], errors="coerce").fillna(0.0)
         else:
-            safe[c] = 0.0
-
-    def spv_of(frame: pd.DataFrame) -> float:
-        visitors = float(frame["count_in"].sum())
-        turnover = float(frame["turnover"].sum())
-        return 0.0 if visitors <= 0 else turnover / (visitors + EPS)
-
-    if mode == "benchmark" and benchmark_shop_id is not None and int(benchmark_shop_id) in safe["shop_id"].astype(int).values:
-        sub = safe[safe["shop_id"].astype(int) == int(benchmark_shop_id)]
-        base = spv_of(sub)
-    elif mode == "manual" and manual_spv is not None:
-        base = float(manual_spv)
-    else:
-        base = spv_of(safe)
-
-    base = max(0.0, float(base))
-    return base * (1.0 + float(uplift_pct))
-
-def compute_csm2i_and_uplift(df: pd.DataFrame, ref_spv: float, csm2i_target: float):
-    out = normalize_kpis(df)
-    out["visitors"]   = out["count_in"]
-    out["actual_spv"] = out["turnover"] / (out["visitors"] + EPS)
-    out["csm2i"]      = out["actual_spv"] / (float(ref_spv) + EPS)
-
-    out["visitors_per_sqm"] = out["count_in"] / (out["sq_meter"] + EPS)
-    out["actual_spsqm"]     = out["turnover"]  / (out["sq_meter"] + EPS)
-    out["expected_spsqm"]   = float(ref_spv)   * out["visitors_per_sqm"]
-
-    out["uplift_eur_csm"]   = np.maximum(0.0, out["visitors"] * (float(csm2i_target) * float(ref_spv) - out["actual_spv"]))
+            out[c] = 0.0
     return out
 
-# =========================
+# -----------------------------
 # Shop mapping
-# =========================
+# -----------------------------
 try:
-    from shop_mapping import SHOP_NAME_MAP as _MAP  # {id:int: "Naam"}
+    from shop_mapping import SHOP_NAME_MAP as _MAP   # {id:int: "Naam"}
 except Exception:
     _MAP = {}
 SHOP_ID_TO_NAME = {int(k): str(v) for k, v in _MAP.items() if str(v).strip()}
 NAME_TO_ID = {v: k for k, v in SHOP_ID_TO_NAME.items()}
 names = sorted(NAME_TO_ID.keys(), key=str.lower)
 
-# =========================
-# UI – periode, winkels, targets
-# =========================
-period_label = st.selectbox("Select period", ["last_month", "last_7_days", "last_30_days"], index=0)
-today = date.today()
-if period_label == "last_month":
-    first = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
-    last  = today.replace(day=1) - timedelta(days=1)
-    date_from, date_to = first, last
-elif period_label == "last_7_days":
-    date_from, date_to = today - timedelta(days=7), today - timedelta(days=1)
-else:
-    date_from, date_to = today - timedelta(days=30), today - timedelta(days=1)
+# -----------------------------
+# Header UI
+# -----------------------------
+st.title("Sales‑per‑sqm Potentieel (CSm²I)")
 
-sel_names = st.multiselect("Select stores", names, default=names, placeholder="Kies 1 of meer winkels…")
-shop_ids = [NAME_TO_ID[n] for n in sel_names]
+period_options = ["7 dagen", "30 dagen", "last_month", "month_to_date", "year_to_date"]
+c1, c2 = st.columns([1,3])
+with c1:
+    period_label = st.selectbox("Select period", period_options, index=1)
+with c2:
+    selected_names = st.multiselect("Select stores", names, default=names[:6])
+shop_ids = [NAME_TO_ID[n] for n in selected_names]
 
-st.toggle("📌 Gebruik benchmark‑winkel i.p.v. vaste CSm²I‑target", value=False, key="use_bm")
-bm_name = st.selectbox("Benchmark‑winkel", names, index=0, disabled=not st.session_state.get("use_bm", False)) if names else None
-
-csm2i_target = st.slider("Target CSm²I", 0.10, 2.00, 0.85, 0.05)
+use_benchmark = st.toggle("📌 Gebruik benchmark‑winkel i.p.v. vaste CSm²I‑target", value=False)
+csm2i_target = st.slider("Target CSm²I", .10, 2.00, .85, .05)
 conv_target_pct = st.slider("Target conversion rate (%)", 1, 80, 35, 1)
 
+# Projectie‑toggle
+proj_rest_year = st.toggle("💡 Projecteer ‘Totaal potentieel’ naar resterend jaar", value=True)
+
+# Run
 run = st.button("Analyseer", type="secondary")
 
-# =========================
-# API helpers
-# =========================
+# -----------------------------
+# Data fetch helpers
+# -----------------------------
 def fetch_report(api_url, shop_ids, dfrom, dto, step, outputs, timeout=60):
     params = [("source","shops"), ("period","date"),
               ("form_date_from",str(dfrom)), ("form_date_to",str(dto)), ("period_step",step)]
-    for sid in shop_ids: params.append(("data", int(sid)))
-    for outp in outputs: params.append(("data_output", outp))
+    for sid in shop_ids:  params.append(("data", int(sid)))
+    for outp in outputs:  params.append(("data_output", outp))
     r = requests.post(api_url, params=params, timeout=timeout); r.raise_for_status()
     return r.json()
 
@@ -155,242 +114,86 @@ def normalize_resp(resp):
     data = resp.get("data", {})
     for _, shops in data.items():
         for sid, payload in shops.items():
-            dates = (payload or {}).get("dates", {})
-            for ts, obj in dates.items():
+            for ts, obj in (payload or {}).get("dates", {}).items():
                 rec = {"timestamp": ts, "shop_id": int(sid), "shop_name": SHOP_ID_TO_NAME.get(int(sid), str(sid))}
                 rec.update((obj or {}).get("data", {}))
                 rows.append(rec)
     df = pd.DataFrame(rows)
     if df.empty: return df
     ts = pd.to_datetime(df["timestamp"], errors="coerce")
-    df["date"] = ts.dt.date; df["hour"] = ts.dt.hour
+    df["date"] = ts.dt.date
     return df
 
-# =========================
-# RUN
-# =========================
+# -----------------------------
+# Compute
+# -----------------------------
 if run:
     if not shop_ids:
         st.warning("Selecteer minimaal één winkel."); st.stop()
+
     API_URL = st.secrets.get("API_URL","")
     if not API_URL:
-        st.warning("Stel `API_URL` in via .streamlit/secrets.toml"); st.stop()
+        st.error("Stel `API_URL` in via .streamlit/secrets.toml"); st.stop()
 
+    date_from, date_to = resolve_period(period_label)
     outputs = ["count_in","transactions","turnover","conversion_rate","sales_per_visitor","sq_meter"]
     with st.spinner("Data ophalen…"):
-        resp = fetch_report(API_URL, shop_ids, date_from, date_to, "day", outputs)
+        resp = fetch_report(API_URL, shop_ids, date_from, date_to, step="day", outputs=outputs)
         df = normalize_resp(resp)
         if df.empty:
-            st.info("Geen data beschikbaar voor de gekozen periode."); st.stop()
+            st.info("Geen data beschikbaar."); st.stop()
 
-    mode = "benchmark" if st.session_state.get("use_bm", False) else "portfolio"
-    bm_id = NAME_TO_ID.get(bm_name) if (mode == "benchmark" and bm_name) else None
-    ref_spv = choose_ref_spv(df, mode=mode, benchmark_shop_id=bm_id, uplift_pct=0.0)
+    # numeriek & basis‑kpi’s
+    df = coerce(df, ["turnover","transactions","count_in","sales_per_visitor","conversion_rate","sq_meter"])
+    if df["conversion_rate"].max() > 1.5:
+        df["conversion_rate"] = df["conversion_rate"] / 100.0
+    df["spv"]    = np.where(df["count_in"]>0, df["turnover"]/ (df["count_in"]+EPS), 0.0)
+    df["atv"]    = np.where(df["transactions"]>0, df["turnover"]/ (df["transactions"]+EPS), 0.0)
+    df["spsqm"]  = np.where(df["sq_meter"]>0, df["turnover"]/ (df["sq_meter"]+EPS), 0.0)
 
-    # Uniforme CSm²I + uplift
-    df = compute_csm2i_and_uplift(df, ref_spv=ref_spv, csm2i_target=csm2i_target)
+    # referentie‑SPV (portfolio)
+    ref_spv = (df["turnover"].sum() / (df["count_in"].sum()+EPS))
+    # CSm²I en uplift
+    df["csm2i"] = np.where(ref_spv>0, df["spv"]/ref_spv, 0.0)
+    df["uplift_csm"]  = np.maximum(0.0, (csm2i_target*ref_spv - df["spv"])) * df["count_in"]
+    conv_target = conv_target_pct/100.0
+    df["uplift_conv"] = np.maximum(0.0, (conv_target - df["conversion_rate"])) * df["count_in"] * df["atv"]
 
-    # Conversie‑uplift
-    conv_target = float(conv_target_pct) / 100.0
-    df["uplift_eur_conv"] = np.maximum(0.0, (conv_target - df["conversion_rate"]) * df["count_in"]) * df["atv"]
-
-    # ========== Aggregatie voor tegels/tabel ==========
     agg = df.groupby(["shop_id","shop_name"]).agg(
-        visitors=("count_in","sum"),
-        turnover=("turnover","sum"),
         sqm=("sq_meter","mean"),
-        spsqm=("actual_spsqm","mean"),
+        spsqm=("spsqm","mean"),
         csm2i=("csm2i","mean"),
-        uplift_csm=("uplift_eur_csm","sum"),
-        uplift_conv=("uplift_eur_conv","sum"),
+        uplift_csm=("uplift_csm","sum"),
+        uplift_conv=("uplift_conv","sum"),
     ).reset_index()
     agg["uplift_total"] = agg["uplift_csm"] + agg["uplift_conv"]
 
-    # --- SPV benchmark t.o.v. beste winkel ---
-    spv_by_shop = df.groupby(["shop_id", "shop_name"])["actual_spv"].mean().reset_index()
-    best_row = spv_by_shop.loc[spv_by_shop["actual_spv"].idxmax()]
-    best_shop_name = str(best_row["shop_name"])
-    best_spv = float(best_row["actual_spv"])
-    agg = agg.merge(spv_by_shop.rename(columns={"actual_spv": "spv_current"}), on=["shop_id", "shop_name"], how="left")
-    agg["uplift_vs_best"] = np.maximum(0.0, (best_spv - agg["spv_current"])) * agg["visitors"]
-    total_uplift_vs_best = float(agg["uplift_vs_best"].sum())
+    # ---------------- KPI‑tegels ----------------
+    k1, k2, k3 = st.columns(3)
+    k1.markdown(f'<div class="card"><div>🚀 <b>CSm²I potential</b><br><small>({period_label}, target CSm²I {csm2i_target:.2f})</small></div><div class="kpi eur">{fmt_eur(agg["uplift_csm"].sum())}</div></div>', unsafe_allow_html=True)
+    k2.markdown(f'<div class="card"><div>🎯 <b>Conversion potential</b><br><small>({period_label}, doel = {conv_target_pct}%)</small></div><div class="kpi eur">{fmt_eur(agg["uplift_conv"].sum())}</div></div>', unsafe_allow_html=True)
+    k3.markdown(f'<div class="card"><div>∑ <b>Total potential</b><br><small>({period_label})</small></div><div class="kpi eur">{fmt_eur(agg["uplift_total"].sum())}</div></div>', unsafe_allow_html=True)
 
-    # ===== KPI‑tegels =====
-    c1, c2, c3 = st.columns(3)
-    c1.markdown(
-        f"""<div class="card"><div>🚀 <b>CSm²I potential</b><br/><small>({period_label}, target CSm²I {csm2i_target:.2f})</small></div>
-            <div class="kpi eur">{fmt_eur(agg["uplift_csm"].sum())}</div></div>""",
-        unsafe_allow_html=True
-    )
-    c2.markdown(
-        f"""<div class="card"><div>🎯 <b>Conversion potential</b><br/><small>({period_label}, target conv = {conv_target_pct}%)</small></div>
-            <div class="kpi eur">{fmt_eur(agg["uplift_conv"].sum())}</div></div>""",
-        unsafe_allow_html=True
-    )
-    c3.markdown(
-        f"""<div class="card"><div>∑ <b>Total potential</b><br/><small>({period_label})</small></div>
-            <div class="kpi eur">{fmt_eur(agg["uplift_total"].sum())}</div></div>""",
-        unsafe_allow_html=True
-    )
-    # Extra SPV‑tegel
-    st.markdown(
-        f"""<div class="card" style="margin-top:10px;">
-              <div>📈 <b>SPV vs Topwinkel</b><br/>
-              <small>Beste: {best_shop_name} (SPV {("€{:,.2f}".format(best_spv)).replace(",", "X").replace(".", ",").replace("X",".")})</small></div>
-              <div class="kpi eur">{fmt_eur(total_uplift_vs_best)}</div>
-            </div>""",
-        unsafe_allow_html=True
-    )
-
-    # ===== kleine spacer =====
-    st.markdown("<div style='height: 12px'></div>", unsafe_allow_html=True)
-
-    # ===== PFM‑oranje total widget =====
-    st.markdown(
-        f"""
-<div style="
-  background:#FEAC76; border:1px solid #E38F59; border-radius:14px;
-  padding:16px 18px; color:#2B1B10;">
-  <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
-    <span style="font-size:20px;">💰</span>
-    <h3 style="margin:0;font-size:1.05rem;">Total extra potential in revenue</h3>
-  </div>
-  <div style="font-size:1.6rem;font-weight:800;">{fmt_eur(agg["uplift_total"].sum())}</div>
-  <div style="margin-top:4px;"><small>Som van CSm²I‑ en conversie‑potentieel voor de geselecteerde periode.</small></div>
-</div>
-""",
-        unsafe_allow_html=True
-    )
-
-    # ===== Tabel =====
-    st.markdown("### 🏆 Stores with most potential")
-    tab_src = agg[[
-        "shop_name","sqm","spsqm","csm2i","uplift_csm","uplift_conv","uplift_total","spv_current","uplift_vs_best"
-    ]].sort_values("uplift_total", ascending=False)
-
-    table = tab_src.rename(columns={
-        "shop_name": "Store",
-        "sqm": "Square meters",
-        "spsqm": "Current Avg Sales per sqm",
-        "csm2i": "CSm²I (index)",
-        "uplift_csm": "Uplift from CSm²I (€)",
-        "uplift_conv": "Uplift from Conversion (€)",
-        "uplift_total": "Total Potential Uplift (€)",
-        "spv_current": "SPV (gem)",
-        "uplift_vs_best": "Uplift vs top‑SPV (€)"
-    }).copy()
-    for col in ["Uplift from CSm²I (€)", "Uplift from Conversion (€)", "Total Potential Uplift (€)", "Uplift vs top‑SPV (€)"]:
-        table[col] = table[col].round(0).apply(fmt_eur)
-    table["Current Avg Sales per sqm"] = table["Current Avg Sales per sqm"].round(2).apply(
-        lambda v: ("€{:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X",".")
-    )
-    table["CSm²I (index)"] = table["CSm²I (index)"].round(2)
-    table["SPV (gem)"] = table["SPV (gem)"].round(2).apply(
-        lambda v: ("€{:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X",".")
-    )
-    st.dataframe(table, use_container_width=True)
-
-    # ===== Visuals =====
-    agg["uplift_csm_eur"]  = agg["uplift_csm"].round(0).map(fmt_eur)
-    bar_csm = px.bar(
-        agg.sort_values("uplift_csm", ascending=False),
-        x="shop_name", y="uplift_csm",
-        labels={"shop_name":"Store","uplift_csm":"CSm²I potential (€)"},
-        custom_data=["uplift_csm_eur"],
-    )
-    bar_csm.update_traces(
-        marker_color="#7C3AED",
-        hovertemplate="<b>%{x}</b><br>CSm²I potential: %{customdata[0]}<extra></extra>",
-    )
-    bar_csm.update_layout(margin=dict(l=20,r=20,t=20,b=20), height=420, yaxis=dict(title="CSm²I potential (€)", tickformat=",.0f"))
-    st.plotly_chart(bar_csm, use_container_width=True)
-
-    agg["uplift_conv_eur"] = agg["uplift_conv"].round(0).map(fmt_eur)
-    bar_conv = px.bar(
-        agg.sort_values("uplift_conv", ascending=False),
-        x="shop_name", y="uplift_conv",
-        labels={"shop_name":"Store","uplift_conv":"Conversion potential (€)"},
-        custom_data=["uplift_conv_eur"],
-    )
-    bar_conv.update_traces(
-        marker_color="#A78BFA",
-        hovertemplate="<b>%{x}</b><br>Conversion potential: %{customdata[0]}<extra></extra>",
-    )
-    bar_conv.update_layout(margin=dict(l=20,r=20,t=20,b=20), height=380, yaxis=dict(title="Conversion potential (€)", tickformat=",.0f"))
-    st.plotly_chart(bar_conv, use_container_width=True)
-
-    # ===== Scatter (laatste visual): SPV vs Sales per m² =====
-    rad = df.groupby(["shop_id", "shop_name"]).agg(
-        spv=("actual_spv", "mean"),
-        spsqm=("actual_spsqm", "mean"),
-        csi=("csm2i", "mean"),
-        visitors=("count_in", "sum"),
-    ).reset_index()
-
-    if "uplift_total" in agg.columns:
-        size_series = agg.set_index("shop_id")["uplift_total"]
-        rad["size_metric"] = rad["shop_id"].map(size_series).fillna(0.0)
-        size_label = "Uplift"
-        rad["hover_size"] = rad["size_metric"].round(0).map(
-            lambda v: ("€{:,.0f}".format(v)).replace(",", "X").replace(".", ",").replace("X", ".")
-        )
-    else:
-        rad["size_metric"] = rad["visitors"].fillna(0.0)
-        size_label = "Bezoekers"
-        rad["hover_size"] = rad["size_metric"].round(0).map(
-            lambda v: "{:,.0f}".format(v).replace(",", ".")
+    # ---------- Projectie resterend jaar (toggle) ----------
+    if proj_rest_year:
+        days_left = remaining_year_days()
+        days_in_period = period_length_days(date_from, date_to)
+        projection = float(agg["uplift_total"].sum()) * (days_left / days_in_period)
+        st.markdown(
+            f"""
+            <div style="margin:10px 0 0 0;padding:16px;border-radius:12px;background:#FEAC7622;border:1px solid #FEAC76">
+              <div style="font-weight:700;">💰 Total extra potential in revenue (resterend jaar)</div>
+              <div style="font-size:1.2rem;font-weight:800;">{fmt_eur(projection)}</div>
+              <div style="opacity:.8;">Projectie: huidig {period_label.lower()}‑potentieel × (resterende dagen dit jaar / dagen in analyseperiode).</div>
+            </div>
+            """,
+            unsafe_allow_html=True
         )
 
-    low_thr  = float(csm2i_target) * 0.95
-    high_thr = float(csm2i_target) * 1.05
-    rad["csm2i_band"] = np.select(
-        [rad["csi"] < low_thr, rad["csi"] > high_thr],
-        ["Onder target", "Boven target"],
-        default="Rond target",
-    )
-
-    rad["hover_spv"]   = rad["spv"].round(2).apply(lambda v: ("€{:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X", "."))
-    rad["hover_spsqm"] = rad["spsqm"].round(2).apply(lambda v: ("€{:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X", "."))
-    rad["hover_csi"]   = rad["csi"].round(2).map(lambda v: str(v).replace(".", ","))
-
-    color_map = {"CSm²I-gedreven": "#7C3AED","Conversie-gedreven": "#F04438","Gemengd": "#64748B"}  # (niet gebruikt hier)
-    color_map2  = {"Onder target": "#F04438", "Rond target": "#F59E0B", "Boven target": "#16A34A"}
-    symbol_map2 = {"Onder target": "diamond", "Rond target": "circle", "Boven target": "square"}
-
-    scatter = px.scatter(
-        rad,
-        x="spv", y="spsqm", size="size_metric",
-        color="csm2i_band", symbol="csm2i_band",
-        color_discrete_map=color_map2, symbol_map=symbol_map2,
-        hover_data=None,
-        custom_data=rad[["hover_spv","hover_spsqm","hover_csi","hover_size"]],
-        labels={"spv": "Sales per Visitor", "spsqm": "Sales per m²", "csm2i_band": "CSm²I t.o.v. target"},
-    )
-    scatter.update_traces(
-        hovertemplate="<b>%{text}</b><br>" +
-                      "SPV: %{customdata[0]}<br>" +
-                      "Sales per m²: %{customdata[1]}<br>" +
-                      "CSm²I: %{customdata[2]}<br>" +
-                      "Uplift/Bezoekers: %{customdata[3]}<extra></extra>",
-        text=rad["shop_name"],
-    )
-    scatter.update_layout(
-        margin=dict(l=20, r=20, t=10, b=10),
-        height=520,
-        legend_title_text="CSm²I t.o.v. target",
-        xaxis=dict(title="Sales per Visitor (€/bezoeker)", tickformat=",.2f"),
-        yaxis=dict(title="Sales per m² (€/m²)", tickformat=",.2f"),
-    )
-    st.plotly_chart(scatter, use_container_width=True)
-
-    # Toelichting
-    st.markdown(
-        """
-**Toelichting**
-
-- **CSm²I (index)** = *actual SPV* ÷ *ref‑SPV*. Verwacht per m² = **ref‑SPV × visitors per m²**.  
-- **CSm²I potential (€)** = *(target_CSm²I × expected − actual)* × m² → extra omzet in de gekozen periode.  
-- **Conversion potential (€)** = *(target_conv − huidige conv) × bezoekers × ATV*.  
-- **Total** = CSm²I‑uplift + conversie‑uplift (geen dubbelcounting).
-"""
-    )
+    # --------- Tabel + charts (ongewijzigd qua stijl) ---------
+    st.subheader("🏆 Stores with most potential")
+    view = agg[["shop_name","sqm","spsqm","csm2i","uplift_csm","uplift_conv","uplift_total"]].rename(columns={
+        "shop_name":"Store","sqm":"Square meters","spsqm":"Current Avg Sales per sqm","csm2i":"CSm²I (index)",
+        "uplift_csm":"Uplift from CSm²I (€)","uplift_conv":"Uplift from Conversion (€)","uplift_total":"Total Potential Uplift (€)"
+    }).sort_values("uplift_total", ascending=False)
+    st.dataframe(view, use_container_width=True, hide_index=True)
