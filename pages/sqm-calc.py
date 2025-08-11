@@ -4,12 +4,14 @@ import pandas as pd
 import numpy as np
 import requests
 from datetime import date, timedelta
+import plotly.express as px
 
 # =========================
 # Page & styling
 # =========================
 st.set_page_config(page_title="Sales‑per‑sqm Potentieel (CSm²I)", page_icon="📈", layout="wide")
-st.markdown("""
+st.markdown(
+    """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap');
 html, body, [class*="css"] { font-family: 'Instrument Sans', sans-serif !important; }
@@ -22,28 +24,9 @@ button[data-testid="stBaseButton-secondary"]:hover { background-color: #d13c30 !
 .card { border: 1px solid #eee; border-radius: 12px; padding: 14px 16px; background:#fff; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
 .kpi  { font-size: 1.2rem; font-weight: 700; }
 .eur  { font-variant-numeric: tabular-nums; }
-
-# kleine spacer tussen KPI-rij en widget
-st.markdown("<div style='height: 12px'></div>", unsafe_allow_html=True)
-
-# ===== Oranje total widget (PFM #FEAC76) =====
-st.markdown(
-    f"""
-    <div style="
-        background:#FEAC76;
-        border:1px solid #E38F59;
-        border-radius:14px;
-        padding:16px 18px;
-        color:#2B1B10;">
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
-        <span style="font-size:20px;">💰</span>
-        <h3 style="margin:0;font-size:1.05rem;">Total extra potential in revenue</h3>
-      </div>
-      <div style="font-size:1.6rem;font-weight:800;">{fmt_eur(agg["uplift_total"].sum())}</div>
-      <div style="margin-top:4px;"><small>Som van CSm²I‑ en conversie‑potentieel voor de geselecteerde periode.</small></div>
-    </div>
-    """,
-    unsafe_allow_html=True
+</style>
+""",
+    unsafe_allow_html=True,
 )
 
 st.title("Sales‑per‑sqm Potentieel (CSm²I)")
@@ -93,7 +76,7 @@ def choose_ref_spv(df: pd.DataFrame, mode="portfolio", benchmark_shop_id=None, m
     Robuust tegen niet‑numerieke data.
     """
     safe = df.copy()
-    for c in ["turnover","count_in"]:
+    for c in ["turnover","count_in","shop_id"]:
         if c in safe.columns:
             safe[c] = pd.to_numeric(safe[c], errors="coerce").fillna(0.0)
         else:
@@ -149,7 +132,6 @@ names = sorted(NAME_TO_ID.keys(), key=str.lower)
 # =========================
 # UI – periode, winkels, targets
 # =========================
-# Periode‑select met preset (we vertalen naar date_from/to)
 period_label = st.selectbox("Select period", ["last_month", "last_7_days", "last_30_days"], index=0)
 today = date.today()
 if period_label == "last_month":
@@ -261,20 +243,30 @@ if run:
         unsafe_allow_html=True
     )
 
-    # ===== Oranje total widget (bovenaan/extra) =====
+    # ===== kleine spacer tussen KPI‑rij en widget =====
+    st.markdown("<div style='height: 12px'></div>", unsafe_allow_html=True)
+
+    # ===== PFM‑oranje total widget =====
     st.markdown(
-        f"""<div class="total-widget">
-              <h3>💰 Total extra potential in revenue</h3>
-              <div class="val eur">{fmt_eur(agg["uplift_total"].sum())}</div>
-              <small>Som van CSm²I‑ en conversie‑potentieel voor de geselecteerde periode.</small>
-            </div>""",
+        f"""
+<div style="
+  background:#FEAC76; border:1px solid #E38F59; border-radius:14px;
+  padding:16px 18px; color:#2B1B10;">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+    <span style="font-size:20px;">💰</span>
+    <h3 style="margin:0;font-size:1.05rem;">Total extra potential in revenue</h3>
+  </div>
+  <div style="font-size:1.6rem;font-weight:800;">{fmt_eur(agg["uplift_total"].sum())}</div>
+  <div style="margin-top:4px;"><small>Som van CSm²I‑ en conversie‑potentieel voor de geselecteerde periode.</small></div>
+</div>
+""",
         unsafe_allow_html=True
     )
 
     # ===== Tabel =====
     st.markdown("### 🏆 Stores with most potential")
 
-    # Sorteer EERST op uplift_total, daarna pas hernoemen + formatteren
+    # Sorteer eerst op uplift_total (bronkolom), daarna hernoemen + formatteren
     tab_src = agg[[
         "shop_name","sqm","spsqm","csm2i","uplift_csm","uplift_conv","uplift_total"
     ]].sort_values("uplift_total", ascending=False)
@@ -289,7 +281,6 @@ if run:
         "uplift_total": "Total Potential Uplift (€)"
     }).copy()
 
-    # opmaak € en decimaal
     for col in ["Uplift from CSm²I (€)", "Uplift from Conversion (€)", "Total Potential Uplift (€)"]:
         tab[col] = tab[col].round(0).apply(fmt_eur)
 
@@ -301,8 +292,6 @@ if run:
     st.dataframe(tab, use_container_width=True)
 
     # ===== Visuals =====
-    import plotly.express as px
-
     # Bar: CSm²I potential per store
     bar_csm = px.bar(
         agg.sort_values("uplift_csm", ascending=False),
@@ -348,11 +337,13 @@ if run:
     st.plotly_chart(bubble, use_container_width=True)
 
     # Toelichting
-    st.markdown("""
+    st.markdown(
+        """
 **Toelichting**
 
 - **CSm²I (index)** = *actual SPV* ÷ *ref‑SPV*. Verwacht per m² = **ref‑SPV × visitors per m²**.  
 - **CSm²I potential (€)** = *(target_CSm²I × expected − actual)* × m² → extra omzet in de gekozen periode.  
 - **Conversion potential (€)** = *(target_conv − huidige conv) × bezoekers × ATV*.  
 - **Total** = CSm²I‑uplift + conversie‑uplift (geen dubbelcounting).
-""")
+"""
+    )
