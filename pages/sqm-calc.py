@@ -277,4 +277,19 @@ if run:
         textposition="outside",
         hovertemplate="%{x}<br>%{customdata[0]}"
     )
-    st.plotly_chart(fig1, use_contai
+    st.plotly_chart(fig1, use_container_width=True)
+
+    agg_sorted_conv = agg.sort_values("uplift_conv", ascending=False).copy()
+    agg_sorted_conv["hover_val"] = agg_sorted_conv["uplift_conv"].map(fmt_eur)
+    fig2 = px.bar(
+        agg_sorted_conv, x="shop_name", y="uplift_conv",
+        labels={"shop_name":"Store","uplift_conv":"Conversion potential (€)"},
+        color_discrete_sequence=[pfm_purple],
+        custom_data=["hover_val"]
+    )
+    fig2.update_traces(
+        text=agg_sorted_conv["uplift_conv"].map(lambda v: ("{:,.0f}".format(v)).replace(",", ".")),
+        textposition="outside",
+        hovertemplate="%{x}<br>%{customdata[0]}"
+    )
+    st.plotly_chart(fig2, use_container_width=True)
