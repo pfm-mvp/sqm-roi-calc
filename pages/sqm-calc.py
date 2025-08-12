@@ -5,6 +5,7 @@ import numpy as np
 import requests
 from datetime import date, timedelta
 import plotly.express as px
+import sys, pathlib  # ← toegevoegd voor robuuste import van shop_mapping
 
 # ─────────────────────────  Page & styling  ─────────────────────────
 st.set_page_config(page_title="Sales‑per‑sqm Potentieel (CSm²I)", page_icon="📈", layout="wide")
@@ -89,20 +90,55 @@ def compute_csm2i(df: pd.DataFrame, ref_spv: float, csm2i_target: float):
     out["uplift_eur_csm"] = np.maximum(0.0, out["visitors"]*(csm2i_target*ref_spv - out["actual_spv"]))
     return out
 
-# ─────────────────────────  Shop mapping  ─────────────────────────
+# ─────────────────────────  Shop mapping (ROBUUST)  ─────────────────────────
+# Zorg dat we vanuit /pages/ ook modules in de project root kunnen importeren
+ROOT = pathlib.Path(__file__).resolve().parents[1]  # …/project_root
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+_MAP = {}
+_import_err = None
 try:
-    from shop_mapping import SHOP_NAME_MAP as _MAP  # {id:int: "Naam"}
+    import shop_mapping as sm
+    # Probeer meerdere gangbare namen zodat oudere/bestaande varianten blijven werken
+    for cand in ("SHOP_NAME_MAP", "SHOP_ID_TO_NAME", "SHOP_MAP", "MAP"):
+        if hasattr(sm, cand):
+            _MAP = getattr(sm, cand) or {}
+            break
+    if not _MAP:
+        _import_err = "Geen geldige mapping‑variabele in shop_mapping.py (verwacht bv. SHOP_NAME_MAP)."
+except Exception as e:
+    _import_err = f"Kon shop_mapping niet importeren: {e}"
+
+# normaliseer naar {int_id: 'Naam'}
+try:
+    SHOP_ID_TO_NAME = {int(k): str(v) for k, v in dict(_MAP).items() if str(v).strip()}
 except Exception:
-    _MAP = {}
-SHOP_ID_TO_NAME = {int(k): str(v) for k, v in _MAP.items() if str(v).strip()}
+    SHOP_ID_TO_NAME = {}
 NAME_TO_ID = {v: k for k, v in SHOP_ID_TO_NAME.items()}
 
+# Feedback + fail‑fast als mapping leeg is
+if not NAME_TO_ID:
+    msg = "Geen filialen geladen. "
+    if _import_err:
+        msg += f"Details: {_import_err}"
+    msg += "\nControleer of `shop_mapping.py` in de project root staat en bv. bevat:\n\n" \
+           "SHOP_NAME_MAP = { 31831: 'Den Bosch', 32224: 'Amersfoort', ... }"
+    st.error(msg)
+    st.stop()
+else:
+    st.caption(f"🔗 Shop mapping geladen: {len(NAME_TO_ID)} filialen.")
+
 # ─────────────────────────  Inputs  ─────────────────────────
-period_label = st.selectbox("Select period", ["7_dagen","30_dagen","last_month","this_month"], index=1,
-                            format_func=lambda s: {"7_dagen":"7 dagen","30_dagen":"30 dagen",
-                                                   "last_month":"last_month","this_month":"this_month"}[s])
-selected = st.multiselect("Select stores", sorted(NAME_TO_ID.keys(), key=str.lower),
-                          default=sorted(NAME_TO_ID.keys(), key=str.lower)[:5])
+period_label = st.selectbox(
+    "Select period",
+    ["7_dagen","30_dagen","last_month","this_month"], index=1,
+    format_func=lambda s: {"7_dagen":"7 dagen","30_dagen":"30 dagen","last_month":"last_month","this_month":"this_month"}[s]
+)
+
+all_store_names = sorted(NAME_TO_ID.keys(), key=str.lower)
+# standaard: ALLE filialen geselecteerd
+selected = st.multiselect("Select stores", all_store_names, default=all_store_names)
 shop_ids = [NAME_TO_ID[n] for n in selected]
 
 left, mid, right = st.columns([1,1,1])
