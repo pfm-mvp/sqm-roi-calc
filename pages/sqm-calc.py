@@ -118,11 +118,18 @@ else:
     st.caption(f"🔗 Shop mapping geladen: {len(NAME_TO_ID)} filialen.")
 
 # ─────────────────────────  Inputs  ─────────────────────────
-period_label = st.selectbox(
-    "Select period",
-    ["7_dagen","30_dagen","last_month","this_month"], index=1,
-    format_func=lambda s: {"7_dagen":"7 dagen","30_dagen":"30 dagen","last_month":"last_month","this_month":"this_month"}[s]
-)
+period_options = {
+    "last_week": "Last week",
+    "this_month": "This month",
+    "last_month": "Last month",
+    "this_quarter": "This quarter",
+    "last_quarter": "Last quarter",
+    "this_year": "This year",
+    "last_year": "Last year"
+}
+period_label = st.selectbox("Select period", list(period_options.keys()),
+                             index=1,
+                             format_func=lambda s: period_options[s])
 
 all_store_names = sorted(NAME_TO_ID.keys(), key=str.lower)
 selected = st.multiselect("Select stores", all_store_names, default=all_store_names)
@@ -140,8 +147,7 @@ run = st.button("🔍 Analyseer", type="secondary")
 
 # ─────────────────────────  API helpers  ─────────────────────────
 def fetch_report(api_url, shop_ids, dfrom, dto, step, outputs, timeout=60):
-    params = [("source","shops"),("period","date"),
-              ("form_date_from",str(dfrom)),("form_date_to",str(dto)),("period_step",step)]
+    params = [("source","shops"),("period",period_label)]
     for sid in shop_ids: params.append(("data", int(sid)))
     for outp in outputs: params.append(("data_output", outp))
     r = requests.post(api_url, params=params, timeout=timeout); r.raise_for_status()
@@ -167,18 +173,6 @@ if run:
     if not shop_ids:
         st.warning("Selecteer minimaal één winkel."); st.stop()
 
-    today = date.today()
-    if period_label == "last_month":
-        first = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
-        last  = today.replace(day=1) - timedelta(days=1)
-        date_from, date_to = first, last
-    elif period_label == "this_month":
-        date_from, date_to = today.replace(day=1), today
-    elif period_label == "7_dagen":
-        date_from, date_to = today - timedelta(days=7), today - timedelta(days=1)
-    else:
-        date_from, date_to = today - timedelta(days=30), today - timedelta(days=1)
-
     API_URL = st.secrets.get("API_URL","")
     if not API_URL:
         st.warning("Stel `API_URL` in via .streamlit/secrets.toml"); st.stop()
@@ -186,7 +180,7 @@ if run:
     outputs = ["count_in","transactions","turnover","conversion_rate","sales_per_visitor","sq_meter"]
 
     with st.spinner("Data ophalen…"):
-        resp = fetch_report(API_URL, shop_ids, date_from, date_to, "day", outputs)
+        resp = fetch_report(API_URL, shop_ids, None, None, "day", outputs)
         df = normalize_resp(resp)
         if df.empty:
             st.info("Geen data voor de gekozen periode."); st.stop()
@@ -207,7 +201,7 @@ if run:
     ).reset_index()
     agg["uplift_total"] = agg["uplift_csm"] + agg["uplift_conv"]
 
-    # KPI-tegels
+    # KPI's
     k1,k2,k3 = st.columns(3)
     k1.markdown(f'<div class="card"><div>🚀 <b>CSm²I potential</b></div><div class="kpi">{fmt_eur(agg["uplift_csm"].sum())}</div></div>', unsafe_allow_html=True)
     k2.markdown(f'<div class="card"><div>🎯 <b>Conversion potential</b></div><div class="kpi">{fmt_eur(agg["uplift_conv"].sum())}</div></div>', unsafe_allow_html=True)
@@ -224,9 +218,9 @@ if run:
         </div>""", unsafe_allow_html=True)
     with c2:
         if proj_toggle:
-            days_in_period = max((date_to - date_from).days + 1, 1)
+            days_in_period = max(df["date"].nunique(), 1)
             daily_uplift = agg["uplift_total"].sum() / days_in_period
-            remain_days = (date(today.year,12,31) - today).days
+            remain_days = (date(today.year,12,31) - date.today()).days
             yearly_proj = daily_uplift * max(remain_days, 0)
             st.markdown(f"""
             <div class="block-orange">
@@ -250,19 +244,24 @@ if run:
     st.dataframe(tbl_disp, use_container_width=True)
 
     # Bars met PFM kleur + EU hover
-    hover_fmt = "%{x}<br>€%{y:,.0f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    fig1 = px.bar(agg.sort_values("uplift_csm", ascending=False),
-                  x="shop_name", y="uplift_csm",
+    agg_sorted_csm = agg.sort_values("uplift_csm", ascending=False).copy()
+    agg_sorted_csm["hover_val"] = agg_sorted_csm["uplift_csm"].map(fmt_eur)
+    fig1 = px.bar(agg_sorted_csm, x="shop_name", y="uplift_csm",
                   labels={"shop_name":"Store","uplift_csm":"CSm²I potential (€)"},
-                  color_discrete_sequence=["#762181"])
-    fig1.update_traces(text=agg.sort_values("uplift_csm", ascending=False)["uplift_csm"].map(lambda v: ("{:,.0f}".format(v)).replace(",", ".")),
-                       textposition="outside", hovertemplate=hover_fmt)
+                  color_discrete_sequence=["#762181"],
+                  custom_data=["hover_val"])
+    fig1.update_traces(text=agg_sorted_csm["uplift_csm"].map(lambda v: ("{:,.0f}".format(v)).replace(",", ".")),
+                       textposition="outside",
+                       hovertemplate="%{x}<br>%{customdata[0]}")
     st.plotly_chart(fig1, use_container_width=True)
 
-    fig2 = px.bar(agg.sort_values("uplift_conv", ascending=False),
-                  x="shop_name", y="uplift_conv",
+    agg_sorted_conv = agg.sort_values("uplift_conv", ascending=False).copy()
+    agg_sorted_conv["hover_val"] = agg_sorted_conv["uplift_conv"].map(fmt_eur)
+    fig2 = px.bar(agg_sorted_conv, x="shop_name", y="uplift_conv",
                   labels={"shop_name":"Store","uplift_conv":"Conversion potential (€)"},
-                  color_discrete_sequence=["#762181"])
-    fig2.update_traces(text=agg.sort_values("uplift_conv", ascending=False)["uplift_conv"].map(lambda v: ("{:,.0f}".format(v)).replace(",", ".")),
-                       textposition="outside", hovertemplate=hover_fmt)
+                  color_discrete_sequence=["#762181"],
+                  custom_data=["hover_val"])
+    fig2.update_traces(text=agg_sorted_conv["uplift_conv"].map(lambda v: ("{:,.0f}".format(v)).replace(",", ".")),
+                       textposition="outside",
+                       hovertemplate="%{x}<br>%{customdata[0]}")
     st.plotly_chart(fig2, use_container_width=True)
